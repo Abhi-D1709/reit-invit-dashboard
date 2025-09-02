@@ -337,10 +337,10 @@ with tab_borrow:
             st.write(f"**Approval Taken**: {approval_display}")
             st.write(f"**Date of meeting for Unitholder Approval**: {row.get('Date of meeting for Unitholder Approval (fmt)', '-')}")
             link_um = _url(next((row.get(c) for c in [
-                "Weblink of Disclosure of Notice for Unitholder Meeting (Exchange)"
+                "Weblink of Disclosure of Outcome of Unitholder Meeting (Exchange)"
             ] if c in cols), "-"))
             if link_um:
-                st.markdown(f"[Notice on Exchange]({link_um})")
+                st.markdown(f"[Disclosure on Exchange]({link_um})")
 
             st.write(f"**Total No. of Unitholders on record date**: {row.get('Total No. of Unitholders on record date', '-')}")
             st.write(f"**Total No. of Votes Cast**: {row.get('Total No. of Votes Cast', '-')}")
