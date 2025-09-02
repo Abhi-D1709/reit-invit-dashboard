@@ -1,14 +1,15 @@
-import os
 import re
 import math
 import numpy as np
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qs
 
 st.set_page_config(page_title="REIT / InvIT Dashboard", page_icon="📊", layout="wide")
 
-DEFAULT_XLSX = "Borrowings.xlsx"  # current dataset: REIT Borrowings only
+# ====== Your Google Sheet (view link is fine) ======
+GSHEET_SHARE_URL_DEFAULT = "https://docs.google.com/spreadsheets/d/1OugwmVbR2BXjWcRGOlLhqrg3APVv9R17LYpZPDeFDkw/edit?usp=sharing"
 
 # Canonical names for selector fields (we map your sheet’s headers to these)
 ENT_COL = "__Entity__"
@@ -16,6 +17,13 @@ FY_COL  = "__FinancialYear__"
 QTR_COL = "__QuarterEnded__"
 
 # ---------- Helpers ----------
+def _safe_secret(key: str, default: str):
+    """Return st.secrets[key] if available; otherwise return default without raising."""
+    try:
+        return st.secrets[key]
+    except Exception:
+        return default
+
 def _to_date(val):
     if val is None or (isinstance(val, str) and val.strip() in {"", "-"}) or pd.isna(val):
         return "-"
@@ -66,10 +74,12 @@ def _find_col(columns, aliases=None, must_tokens=None, exclude_tokens=None):
     exclude_tokens = [t.replace(" ", "") for t in (exclude_tokens or [])]
     norm_map = {c: _norm(c) for c in columns}
     norm_aliases = {_norm(a): a for a in aliases}
-    for c, n in norm_map.items():  # exact alias
+    # exact alias
+    for c, n in norm_map.items():
         if n in norm_aliases:
             return c
-    for c, n in norm_map.items():  # token match
+    # token match
+    for c, n in norm_map.items():
         if all(t in n for t in must_tokens) and not any(x in n for x in exclude_tokens):
             return c
     return None
@@ -90,16 +100,21 @@ def _num_series(df: pd.DataFrame, colname: str, fill=0.0) -> pd.Series:
 def _standardize_selector_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Map your sheet’s headers to canonical Entity / Financial Year / Quarter Ended."""
     cols = df.columns
-    entity_col = _find_col(cols,
+    entity_col = _find_col(
+        cols,
         aliases=["Entity", "Entity Name", "REIT", "REIT Name", "Name of REIT",
-                 "Trust", "Trust Name", "Issuer", "Issuer Name", "InvIT / REIT Name"])
-    fy_col = _find_col(cols,
+                 "Trust", "Trust Name", "Issuer", "Issuer Name", "InvIT / REIT Name"]
+    )
+    fy_col = _find_col(
+        cols,
         aliases=["Financial Year", "Fin Year", "FY", "Financial Yr", "Year"],
-        must_tokens=["financial", "year"], exclude_tokens=["quarter", "qtr"]) \
-        or _find_col(cols, aliases=[], must_tokens=["year"], exclude_tokens=["quarter", "qtr"])
-    qtr_col = _find_col(cols,
+        must_tokens=["financial", "year"], exclude_tokens=["quarter", "qtr"]
+    ) or _find_col(cols, aliases=[], must_tokens=["year"], exclude_tokens=["quarter", "qtr"])
+    qtr_col = _find_col(
+        cols,
         aliases=["Quarter Ended", "Quarter", "Qtr", "Q/E", "Quarter (Ended)"],
-        must_tokens=["quarter"], exclude_tokens=["year"])
+        must_tokens=["quarter"], exclude_tokens=["year"]
+    )
 
     missing = []
     if entity_col is None: missing.append("Entity (e.g., 'Entity' / 'REIT Name')")
@@ -111,6 +126,7 @@ def _standardize_selector_columns(df: pd.DataFrame) -> pd.DataFrame:
             "Missing required selector columns:\n- " + "\n- ".join(missing) +
             "\n\nAvailable columns:\n- " + "\n- ".join(map(str, cols))
         )
+        # prevent downstream KeyError before we stop:
         for cname in (ENT_COL, FY_COL, QTR_COL):
             if cname not in df.columns:
                 df[cname] = np.nan
@@ -124,41 +140,58 @@ def _quarter_sort(values):
     order = {"June": 0, "Sept": 1, "Sep": 1, "December": 2, "Dec": 2, "Mar": 3, "March": 3}
     return sorted(values, key=lambda v: order.get(str(v), 99))
 
-# ---------- Data loader for Borrowings (REIT) ----------
-@st.cache_data(show_spinner=False, ttl=120)
-def load_borrowings(uploaded_file):
-    # Read file (uploaded or local)
-    df = pd.read_excel(uploaded_file if uploaded_file is not None else DEFAULT_XLSX, sheet_name=0)
+def _share_to_csv_url(url: str) -> str:
+    """
+    Accepts:
+      - a Google Sheets view URL like .../edit?usp=sharing or .../edit#gid=123
+      - or already a /export?format=csv&gid=...
+      - or a published .../pub?output=csv
+    Returns a /export?format=csv&gid=... URL.
+    """
+    if not url:
+        return ""
+    if "output=csv" in url or "/export" in url:
+        return url  # already good
+    # Extract sheet id
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
+    if not m:
+        return url  # fallback; loader will error nicely
+    sheet_id = m.group(1)
+    gid = "0"
+    # Try to get gid from fragment or query
+    if "#gid=" in url:
+        gid = url.split("#gid=")[-1].split("&")[0]
+    else:
+        qs_gid = parse_qs(urlparse(url).query).get("gid", [None])[0]
+        if qs_gid:
+            gid = str(qs_gid)
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
-    # Normalize headers
+# ---------- Processing logic (shared) ----------
+def _process_borrowings_df(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
-
-    # Standardize selectors
     df = _standardize_selector_columns(df)
 
-    # Numeric column detection
     cols = df.columns
-    borrow_col = _find_col(cols, aliases=["Borrowings", "A. Borrowings", "A - Borrowings", "A Borrowings"], must_tokens=["borrow"])
-    defer_col  = _find_col(cols, aliases=["Deferred Payments", "B. Deferred Payments", "Deferred Payment"], must_tokens=["defer", "payment"])
-    cash_col   = _find_col(cols, aliases=["Cash and Cash Equivalents", "C. Cash and Cash Equivalents", "Cash & Cash Equivalents", "Cash and cash equivalents"], must_tokens=["cash", "equivalent"])
-    assets_col = _find_col(cols, aliases=["Value of REIT Assets", "D. Value of REIT Assets", "Value of Assets"], must_tokens=["value", "asset", "reit"])
+    borrow_col = _find_col(cols, aliases=["Borrowings","A. Borrowings","A - Borrowings","A Borrowings"], must_tokens=["borrow"])
+    defer_col  = _find_col(cols, aliases=["Deferred Payments","B. Deferred Payments","Deferred Payment"], must_tokens=["defer","payment"])
+    cash_col   = _find_col(cols, aliases=["Cash and Cash Equivalents","C. Cash and Cash Equivalents","Cash & Cash Equivalents","Cash and cash equivalents"], must_tokens=["cash","equivalent"])
+    assets_col = _find_col(cols, aliases=["Value of REIT Assets","D. Value of REIT Assets","Value of Assets"], must_tokens=["value","asset","reit"])
 
-    # Series (never scalars)
     A = _num_series(df, borrow_col, 0.0)
     B = _num_series(df, defer_col, 0.0)
     C = _num_series(df, cash_col, 0.0)
     D = _num_series(df, assets_col, np.nan)
 
-    # NBR normalize / compute; guard D==0
-    nbr_col = _find_col(cols, aliases=["Net Borrowings Ratio (NBR)"], must_tokens=["borrow", "ratio", "nbr"])
+    nbr_col = _find_col(cols, aliases=["Net Borrowings Ratio (NBR)"], must_tokens=["borrow","ratio","nbr"])
     if nbr_col:
         df["NBR_ratio"] = df[nbr_col].apply(_to_pct)
+
     if "NBR_ratio" not in df.columns or df["NBR_ratio"].isna().any():
         D_safe = D.replace(0, np.nan)
         computed = (A.add(B, fill_value=0).sub(C, fill_value=0)) / D_safe
         df["NBR_ratio"] = df.get("NBR_ratio", computed).fillna(computed)
 
-    # Date formatting
     for col in [
         "Date of Publishing Credit Rating CRA1",
         "Date of Publishing Credit Rating CRA2",
@@ -168,7 +201,6 @@ def load_borrowings(uploaded_file):
         if col in df.columns:
             df[f"{col} (fmt)"] = df[col].apply(_to_date)
 
-    # Debug info
     df.attrs["__matched_cols__"] = {
         "Borrowings": borrow_col, "Deferred Payments": defer_col,
         "Cash and Cash Equivalents": cash_col, "Value of REIT Assets": assets_col,
@@ -176,7 +208,14 @@ def load_borrowings(uploaded_file):
     }
     return df
 
-# ---------- UI ----------
+# ---------- Google Sheets loader ----------
+@st.cache_data(show_spinner=False, ttl=300)
+def load_borrowings_gsheet(share_or_csv_url: str) -> pd.DataFrame:
+    csv_url = _share_to_csv_url(share_or_csv_url)
+    df = pd.read_csv(csv_url)
+    return _process_borrowings_df(df)
+
+# ================================= UI =================================
 st.title("REIT / InvIT Dashboard")
 
 tab_fund, tab_borrow, tab_ndcf = st.tabs(["Fund Raising", "Borrowings", "NDCF"])
@@ -195,9 +234,24 @@ with tab_borrow:
     if segment == "InvIT":
         st.info("InvIT Borrowings dashboard will appear here once data is available.")
     else:
-        # Data controls (kept inside this tab)
-        up = st.file_uploader("Upload updated Borrowings.xlsx (optional)", type=["xlsx"])
-        df = load_borrowings(up)
+        st.subheader("Data Source: Google Sheets")
+        # Safe default (no secrets required locally)
+        default_url = _safe_secret("GSHEET_SHARE_URL", GSHEET_SHARE_URL_DEFAULT)
+        share_url = st.text_input(
+            "Paste your Google Sheets link (view or export):",
+            value=default_url,
+            placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0",
+        )   
+
+        try:
+            df = load_borrowings_gsheet(share_url)
+        except Exception as e:  
+            st.error(
+                "Could not read the Google Sheet. Make sure sharing is set to "
+                "**Anyone with the link – Viewer**.\n\n"
+                f"Details: {e}"
+            )
+            st.stop()
 
         fatal = df.attrs.get("__fatal__")
         if fatal:
@@ -281,7 +335,7 @@ with tab_borrow:
 
             credit_taken = _is_taken(cra1_rating) or _is_taken(cra2_rating)
 
-            # Unitholder Approval (correct spelling only)
+            # Unitholder Approval
             ua_col = _find_col(
                 cols,
                 aliases=["Unitholder Approval", "Unitholder approval"],
@@ -337,7 +391,8 @@ with tab_borrow:
             st.write(f"**Approval Taken**: {approval_display}")
             st.write(f"**Date of meeting for Unitholder Approval**: {row.get('Date of meeting for Unitholder Approval (fmt)', '-')}")
             link_um = _url(next((row.get(c) for c in [
-                "Weblink of Disclosure of Outcome of Unitholder Meeting (Exchange)"
+                "Weblink of Disclosure of Outcome of Unitholder Meeting (Exchange)",
+                "Weblink of Disclosure of Notice for Unitholder Meeting (Exchange)"
             ] if c in cols), "-"))
             if link_um:
                 st.markdown(f"[Disclosure on Exchange]({link_um})")
