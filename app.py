@@ -1,29 +1,63 @@
+# app.py
+import io
 import re
 import math
+import json
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 
+# --------------------------- Page Config & Light Styling ---------------------------
 st.set_page_config(page_title="REIT / InvIT Dashboard", page_icon="📊", layout="wide")
 
-# ====== Your Google Sheet (view link is fine) ======
-GSHEET_SHARE_URL_DEFAULT = "https://docs.google.com/spreadsheets/d/1OugwmVbR2BXjWcRGOlLhqrg3APVv9R17LYpZPDeFDkw/edit?usp=sharing"
+# Subtle, formal UI styling (works with Streamlit light & dark themes)
+st.markdown(
+    """
+    <style>
+      .app-hero {
+        padding: 14px 18px;
+        border-radius: 14px;
+        border: 1px solid rgba(0,0,0,0.06);
+        background: linear-gradient(180deg, rgba(25,118,210,0.08) 0%, rgba(25,118,210,0.03) 100%);
+        margin-bottom: 14px;
+      }
+      .big-title { font-size: 1.9rem; font-weight: 700; margin: 0; line-height: 1.2; }
+      .subtle { color: var(--text-color-secondary, #6b7280); margin-top: 6px; }
+      .card {
+        padding: 14px 16px; border-radius: 12px; background: rgba(255,255,255,0.7);
+        border: 1px solid rgba(0,0,0,0.06);
+      }
+      .kpi {
+        padding: 12px 14px; border-radius: 12px; color: #fff;
+        background: linear-gradient(135deg, #1976D2, #115293);
+      }
+      .chip {
+        display: inline-block; padding: 4px 10px; border-radius: 999px;
+        font-size: 12px; border: 1px solid rgba(0,0,0,0.12);
+        background: rgba(0,0,0,0.03);
+        margin-left: 8px;
+      }
+      .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .muted { color: #6b7280; }
+      .link-list a { text-decoration: none; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# Canonical names for selector fields (we map your sheet’s headers to these)
+# --------------------------- Defaults ---------------------------
+# Your Google Sheet (view link is fine). You can paste any other URL in the UI.
+DEFAULT_DATA_URL = "https://docs.google.com/spreadsheets/d/1OugwmVbR2BXjWcRGOlLhqrg3APVv9R17LYpZPDeFDkw/edit?usp=sharing"
+
+# Canonical internal names (we map your sheet headers to these)
 ENT_COL = "__Entity__"
 FY_COL  = "__FinancialYear__"
 QTR_COL = "__QuarterEnded__"
 
-# ---------- Helpers ----------
-def _safe_secret(key: str, default: str):
-    """Return st.secrets[key] if available; otherwise return default without raising."""
-    try:
-        return st.secrets[key]
-    except Exception:
-        return default
-
+# --------------------------- Helpers ---------------------------
 def _to_date(val):
     if val is None or (isinstance(val, str) and val.strip() in {"", "-"}) or pd.isna(val):
         return "-"
@@ -74,11 +108,11 @@ def _find_col(columns, aliases=None, must_tokens=None, exclude_tokens=None):
     exclude_tokens = [t.replace(" ", "") for t in (exclude_tokens or [])]
     norm_map = {c: _norm(c) for c in columns}
     norm_aliases = {_norm(a): a for a in aliases}
-    # exact alias
+    # 1) exact alias
     for c, n in norm_map.items():
         if n in norm_aliases:
             return c
-    # token match
+    # 2) token-based
     for c, n in norm_map.items():
         if all(t in n for t in must_tokens) and not any(x in n for x in exclude_tokens):
             return c
@@ -144,21 +178,19 @@ def _share_to_csv_url(url: str) -> str:
     """
     Accepts:
       - a Google Sheets view URL like .../edit?usp=sharing or .../edit#gid=123
-      - or already a /export?format=csv&gid=...
-      - or a published .../pub?output=csv
+      - already /export?format=csv&gid=...
+      - published .../pub?output=csv
     Returns a /export?format=csv&gid=... URL.
     """
     if not url:
         return ""
     if "output=csv" in url or "/export" in url:
-        return url  # already good
-    # Extract sheet id
+        return url  # already CSV export
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
     if not m:
-        return url  # fallback; loader will error nicely
+        return url  # not a sheet; caller will handle other formats
     sheet_id = m.group(1)
     gid = "0"
-    # Try to get gid from fragment or query
     if "#gid=" in url:
         gid = url.split("#gid=")[-1].split("&")[0]
     else:
@@ -167,7 +199,7 @@ def _share_to_csv_url(url: str) -> str:
             gid = str(qs_gid)
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
-# ---------- Processing logic (shared) ----------
+# --------------------------- Processing logic (shared) ---------------------------
 def _process_borrowings_df(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
     df = _standardize_selector_columns(df)
@@ -208,15 +240,118 @@ def _process_borrowings_df(df: pd.DataFrame) -> pd.DataFrame:
     }
     return df
 
-# ---------- Google Sheets loader ----------
+# --------------------------- Universal URL Loader ---------------------------
 @st.cache_data(show_spinner=False, ttl=300)
-def load_borrowings_gsheet(share_or_csv_url: str) -> pd.DataFrame:
-    csv_url = _share_to_csv_url(share_or_csv_url)
-    df = pd.read_csv(csv_url)
-    return _process_borrowings_df(df)
+def load_borrowings_url(url: str) -> pd.DataFrame:
+    """
+    Accepts public URLs for:
+      - Google Sheets (view link auto-converted to CSV export)
+      - CSV
+      - XLSX
+      - JSON
+      - HTML pages containing <table>
+    Returns a cleaned dataframe ready for the dashboard.
+    """
+    if not url or not str(url).strip():
+        raise ValueError("Empty URL.")
 
-# ================================= UI =================================
-st.title("REIT / InvIT Dashboard")
+    url = url.strip()
+
+    # Google Sheets view link → CSV export
+    if "docs.google.com/spreadsheets" in url:
+        url = _share_to_csv_url(url)
+
+    # 1) Try CSV directly
+    try:
+        df = pd.read_csv(url)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return _process_borrowings_df(df)
+    except Exception:
+        pass
+
+    # 2) Try Excel via bytes
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=25)
+        resp.raise_for_status()
+        # Try as excel
+        try:
+            df = pd.read_excel(io.BytesIO(resp.content), sheet_name=0)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return _process_borrowings_df(df)
+        except Exception:
+            pass
+        # 3) Try JSON from same response
+        try:
+            data = resp.json()
+            # Normalize nested JSON into a DataFrame (best-effort)
+            if isinstance(data, list):
+                df = pd.json_normalize(data)
+            elif isinstance(data, dict):
+                # choose a likely records key or flatten dict
+                records = None
+                for key in ["data", "rows", "items", "records", "result"]:
+                    if key in data and isinstance(data[key], list):
+                        records = data[key]
+                        break
+                if records is None:
+                    records = [data]
+                df = pd.json_normalize(records)
+            else:
+                df = pd.DataFrame(data)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return _process_borrowings_df(df)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # 4) Try JSON via pandas (URL)
+    try:
+        df = pd.read_json(url)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return _process_borrowings_df(df)
+    except Exception:
+        pass
+
+    # 5) Try HTML tables
+    try:
+        tables = pd.read_html(url)
+        if tables:
+            df = max(tables, key=lambda t: (t.shape[0] * t.shape[1]))
+            return _process_borrowings_df(df)
+    except Exception:
+        pass
+
+    raise ValueError("Couldn't parse the URL as CSV, Excel, JSON, or an HTML table. "
+                     "Ensure it is publicly accessible without login.")
+
+# ============================== UI ==============================
+st.markdown(
+    """
+    <style>
+      /* add/override after your existing CSS */
+      .app-hero {
+        text-align: center;
+        max-width: 900px;          /* tweak as you like */
+        margin: 0 auto 14px;       /* centers the block */
+      }
+      .big-title, .subtle { text-align: center; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="app-hero">
+      <div class="big-title">REIT / InvIT Dashboard</div>
+      <div class="subtle">Monitor Borrowings, Fund Raising, and NDCF with clean, formal visuals.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 tab_fund, tab_borrow, tab_ndcf = st.tabs(["Fund Raising", "Borrowings", "NDCF"])
 
@@ -234,23 +369,17 @@ with tab_borrow:
     if segment == "InvIT":
         st.info("InvIT Borrowings dashboard will appear here once data is available.")
     else:
-        st.subheader("Data Source: Google Sheets")
-        # Safe default (no secrets required locally)
-        default_url = _safe_secret("GSHEET_SHARE_URL", GSHEET_SHARE_URL_DEFAULT)
-        share_url = st.text_input(
-            "Paste your Google Sheets link (view or export):",
-            value=default_url,
-            placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0",
-        )   
+        st.subheader("Data Source")
+        data_url = st.text_input("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table):", value=DEFAULT_DATA_URL, placeholder="https://...")
+
+        if not data_url.strip():
+            st.warning("Please provide a data URL.")
+            st.stop()
 
         try:
-            df = load_borrowings_gsheet(share_url)
-        except Exception as e:  
-            st.error(
-                "Could not read the Google Sheet. Make sure sharing is set to "
-                "**Anyone with the link – Viewer**.\n\n"
-                f"Details: {e}"
-            )
+            df = load_borrowings_url(data_url.strip())
+        except Exception as e:
+            st.error(f"Could not read the URL. Make sure it’s publicly accessible.\n\nDetails: {e}")
             st.stop()
 
         fatal = df.attrs.get("__fatal__")
@@ -258,44 +387,45 @@ with tab_borrow:
             st.error(fatal)
             st.stop()
 
-        # Filters
-        filt1, filt2, filt3 = st.columns(3)
-        with filt1:
-            entities = sorted(df[ENT_COL].dropna().astype(str).unique())
-            entity = st.selectbox("Entity", entities)
-        with filt2:
-            fy_options = sorted(df.loc[df[ENT_COL] == entity, FY_COL].dropna().astype(str).unique())
-            fy = st.selectbox("Financial Year", fy_options)
-        with filt3:
-            qtr_present = df.loc[(df[ENT_COL] == entity) & (df[FY_COL] == fy), QTR_COL].dropna().astype(str).unique().tolist()
-            qtr = st.selectbox("Quarter", _quarter_sort(qtr_present))
+        # Filters (inside a card)
+        with st.container():
+            filt_cols = st.columns(3)
+            with filt_cols[0]:
+                entities = sorted(df[ENT_COL].dropna().astype(str).unique())
+                entity = st.selectbox("Entity", entities)
+            with filt_cols[1]:
+                fy_options = sorted(df.loc[df[ENT_COL] == entity, FY_COL].dropna().astype(str).unique())
+                fy = st.selectbox("Financial Year", fy_options)
+            with filt_cols[2]:
+                qtr_present = df.loc[(df[ENT_COL] == entity) & (df[FY_COL] == fy), QTR_COL].dropna().astype(str).unique().tolist()
+                qtr = st.selectbox("Quarter", _quarter_sort(qtr_present))
 
-        # Row selection
         row_df = df[(df[ENT_COL] == entity) & (df[FY_COL] == fy) & (df[QTR_COL] == qtr)]
         if row_df.empty:
             st.warning("No data found for the selected filters.")
             st.stop()
         row = row_df.iloc[0]
 
-        st.divider()
+        st.markdown("### Overview")
 
-        # ---------- NBR + components ----------
-        left, right = st.columns([1, 1])
-        with left:
-            st.subheader("Net Borrowings Ratio (NBR) = (A+B−C)/D")
+        # KPI + Breakup grid
+        colA, colB = st.columns([0.9, 1.1])
+
+        with colA:
             nbr = row.get("NBR_ratio", None)
             nbr_display = "-" if nbr is None or pd.isna(nbr) else f"{float(nbr)*100:.2f}%"
-            st.metric("NBR", nbr_display)
+            st.markdown('<div class="kpi">📊 <b>Net Borrowings Ratio</b><br>'
+                        f'<span style="font-size:28px;font-weight:700;">{nbr_display}</span></div>', unsafe_allow_html=True)
             if isinstance(nbr, (int, float)) and not pd.isna(nbr):
                 st.progress(min(max(float(nbr), 0.0), 1.0))
 
-        with right:
-            st.subheader("Breakup")
+        with colB:
             m = df.attrs.get("__matched_cols__", {})
             a_label = m.get("Borrowings") or "Borrowings"
             b_label = m.get("Deferred Payments") or "Deferred Payments"
             c_label = m.get("Cash and Cash Equivalents") or "Cash and Cash Equivalents"
             d_label = m.get("Value of REIT Assets") or "Value of REIT Assets"
+            st.markdown("**Breakup**")
             st.write(
                 f"""
 - **A. Borrowings**: {row.get(a_label, "-")}
@@ -304,8 +434,11 @@ with tab_borrow:
 - **D. Value of REIT Assets**: {row.get(d_label, "-")}
 """
             )
+            st.markdown('</div>', unsafe_allow_html=True)
 
-        # ---------- Conditional sections ----------
+        st.markdown("---")
+
+        # Conditional sections
         SHOW_THRESHOLD = 0.25
         show_sections = isinstance(nbr, (int, float)) and not pd.isna(nbr) and nbr >= SHOW_THRESHOLD
 
@@ -354,27 +487,29 @@ with tab_borrow:
             if missing:
                 msg = ("Both Credit Rating and Unitholder Approval are not taken / not available for this period, even though NBR ≥ 25%."
                        if len(missing) == 2 else
-                       f"{missing[0]} is not taken / not available for this period, even though NBR ≥ 25%.")
+                       f"{missing[0]} is not taken / not available for this period, even though NBR ≥ 25%."
+                )
                 st.error(f"ALERT: {msg}")
 
-            # ---- Credit Rating (dual) ----
-            st.subheader("Credit Rating")
-            st.caption("Source: Website of Exchange and/or Website of Entity / CRA website; Annual Report")
-            c1, c2 = st.columns(2)
-            with c1:
+            # Credit Rating (dual)
+            st.markdown("### Credit Rating")
+            cr1, cr2 = st.columns(2)
+            with cr1:
                 st.markdown("**CRA1**")
                 st.write(f"**Rating**: {cra1_rating if _is_taken(cra1_rating) else '-'}")
                 st.write(f"**Name of CRA**: {cra1_name if _is_taken(cra1_name) else '-'}")
                 st.write(f"**Date of Publishing Credit Rating**: {_to_date(cra1_date) if _is_taken(cra1_date) else '-'}")
                 if cra1_link: st.markdown(f"[CRA1 Disclosure Link]({cra1_link})")
-            with c2:
+                st.markdown('</div>', unsafe_allow_html=True)
+            with cr2:
                 st.markdown("**CRA2**")
                 st.write(f"**Rating**: {cra2_rating if _is_taken(cra2_rating) else '-'}")
                 st.write(f"**Name of CRA**: {cra2_name if _is_taken(cra2_name) else '-'}")
                 st.write(f"**Date of Publishing Credit Rating**: {_to_date(cra2_date) if _is_taken(cra2_date) else '-'}")
                 if cra2_link: st.markdown(f"[CRA2 Disclosure Link]({cra2_link})")
+                st.markdown('</div>', unsafe_allow_html=True)
 
-            # Optional combined metric (if present)
+            # Optional combined metric
             updown2 = next((row.get(c) for c in [
                 "No. of Rating Upgrades/Downgrades CRA1",
                 "No. of Rating Upgrades/Downgrades CRA2",
@@ -382,11 +517,10 @@ with tab_borrow:
             ] if c in cols), "-")
             st.write(f"**No. of Rating Upgrades/Downgrades**: {updown2}")
 
-            st.divider()
+            st.markdown("---")
 
-            # ---- Unitholder Approval ----
-            st.subheader("Unitholder Approval")
-            st.caption("Source: Website of Exchange and/or Website of Entity; Annual Report")
+            # Unitholder Approval
+            st.markdown("### Unitholder Approval")
             approval_display = "Yes" if unit_taken else ("No" if _is_taken(unitholder_approval_val) else "-")
             st.write(f"**Approval Taken**: {approval_display}")
             st.write(f"**Date of meeting for Unitholder Approval**: {row.get('Date of meeting for Unitholder Approval (fmt)', '-')}")
@@ -396,26 +530,28 @@ with tab_borrow:
             ] if c in cols), "-"))
             if link_um:
                 st.markdown(f"[Disclosure on Exchange]({link_um})")
-
             st.write(f"**Total No. of Unitholders on record date**: {row.get('Total No. of Unitholders on record date', '-')}")
             st.write(f"**Total No. of Votes Cast**: {row.get('Total No. of Votes Cast', '-')}")
             st.write(f"**Votes Cast (Favour/Against)**: {row.get('Votes Cast in Favour/Votes Cast Against', '-')}")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-            st.divider()
+            st.markdown("---")
 
-            # ---- Additional Compliances ----
-            st.subheader("Additional Compliances")
+            # Additional Compliances
+            st.markdown("### Additional Compliances")
             st.write(f"**Whether NBR > 25% due to market movement?**  {row.get('Whether NBR>25% on account of market movement?', '-')}")
             st.write(f"**Date of intimation to Trustee**: {row.get('Date Of intimation to Trustee (fmt)', '-')}")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-        st.divider()
+        st.markdown("---")
         st.markdown(
             """
-- [Indiabondinfo](https://www.indiabondinfo.nsdl.com/)
-- [CDSL BondInfo](https://www.cdslindia.com/CorporateBond/SearchISIN.aspx)
-- [NSE India](https://www.nseindia.com)
-- [BSE India](https://www.bseindia.com)
-"""
+            **Common Links**
+            - [Indiabondinfo](https://www.indiabondinfo.nsdl.com/)
+            - [CDSL BondInfo](https://www.cdslindia.com/CorporateBond/SearchISIN.aspx)
+            - [NSE India](https://www.nseindia.com)
+            - [BSE India](https://www.bseindia.com)
+            """,
         )
 
 # ---------------- NDCF ----------------
