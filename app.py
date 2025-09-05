@@ -390,8 +390,7 @@ def load_fundraising_url(url: str, segment: str) -> pd.DataFrame:
 # ======================== Borrowings UI (with InvIT rules) ========================
 def render_borrowings_panel(default_url: str, segment_label: str, ruleset: str = "reit"):
     st.subheader("Data Source")
-    st.caption("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table).")
-    data_url = st.text_input("Data URL", value=default_url, key=f"data_url_{segment_label}")
+    data_url = st.text_input("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table):", value=default_url, key=f"data_url_{segment_label}")
 
     if not data_url.strip():
         st.warning("Please provide a data URL.")
@@ -587,8 +586,7 @@ def render_borrowings_panel(default_url: str, segment_label: str, ruleset: str =
 # ======================== Fund Raising UI (Simplified Charts) ========================
 def render_fund_raising_panel(default_url: str, segment_label: str):
     st.subheader("Data Source")
-    st.caption("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table).")
-    data_url = st.text_input("Data URL", value=default_url, key=f"fund_url_{segment_label}")
+    data_url = st.text_input("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table):", value=default_url, key=f"fund_url_{segment_label}")
 
     if not data_url.strip():
         st.warning("Please provide a data URL.")
