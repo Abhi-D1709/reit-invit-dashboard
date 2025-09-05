@@ -725,7 +725,6 @@ st.markdown(
     """
     <div class="app-hero">
       <div class="big-title">REIT / InvIT Dashboard</div>
-      <div class="subtle">Monitor Borrowings, Fund Raising, and NDCF with clean, formal visuals.</div>
     </div>
     """,
     unsafe_allow_html=True,
