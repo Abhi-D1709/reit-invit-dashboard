@@ -641,7 +641,7 @@ def render_fund_raising_panel(default_url: str, segment_label: str):
     with k1:
         st.markdown(f'<div class="kpi">💰 <b>Total Amount Raised</b><br><span style="font-size:26px;font-weight:700;">{total_amount:,.2f}</span><br><span class="muted">(units as in data)</span></div>', unsafe_allow_html=True)
     with k2:
-        st.markdown(f'<div class="kpi">📈 <b>Number of Raises</b><br><span style="font-size:26px;font-weight:700;">{num_raises}</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="kpi">📈 <b>Number of Times Fund Raised</b><br><span style="font-size:26px;font-weight:700;">{num_raises}</span></div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
