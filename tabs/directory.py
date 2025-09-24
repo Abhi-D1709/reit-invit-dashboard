@@ -8,12 +8,12 @@ import pandas as pd
 import streamlit as st
 
 from utils.common import (
-    load_table_url,                # leave as-is
+    load_table_url,                # uses your existing helper
     DEFAULT_REIT_DIR_URL,
     DEFAULT_INVIT_DIR_URL,
 )
 
-# -------------------- tiny helpers --------------------
+# =========================== small utilities ===========================
 
 def _clean(s) -> str:
     if s is None:
@@ -22,15 +22,16 @@ def _clean(s) -> str:
     return re.sub(r"\s+", " ", s)
 
 def _split_list(val) -> List[str]:
+    """Split multi-line / comma / semicolon sponsor lists; strip bullets like '1. '."""
     if val is None or str(val).strip() == "":
         return []
     s = str(val).replace("\r", "\n")
-    s = re.sub(r"\n?\s*\d+\.\s*", "\n", s)          # remove "1. " style bullets
+    s = re.sub(r"\n?\s*\d+\.\s*", "\n", s)          # remove "1. " bullets
     parts = re.split(r"[\n;|,]+", s)
     return [p.strip() for p in parts if p and p.strip() != "-"]
 
 def _popover_or_expander(label: str):
-    # Use popover when available for a neat click-reveal, else fallback to expander
+    """Use popover if available (Streamlit ≥ 1.31), else expander."""
     return st.popover(label, use_container_width=True) if hasattr(st, "popover") else st.expander(label, expanded=False)
 
 def _details_md(items: Dict[str, str]) -> str:
@@ -42,6 +43,7 @@ def _details_md(items: Dict[str, str]) -> str:
     return "\n".join(lines) if lines else "- No additional details available."
 
 def _first_nonempty(df: pd.DataFrame, row: pd.Series, candidates: List[str]) -> Optional[str]:
+    """Return the first column name in candidates that has a non-empty value in this row."""
     for c in candidates:
         if c in df.columns:
             v = row.get(c)
@@ -57,7 +59,8 @@ def _gid_from_url(url: str) -> Optional[str]:
     m = re.search(r"[?&]gid=(\d+)", url)
     return m.group(1) if m else None
 
-# -------------------- loaders --------------------
+
+# ============================== loaders ===============================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_sheet1(url: str) -> pd.DataFrame:
@@ -65,56 +68,67 @@ def _load_sheet1(url: str) -> pd.DataFrame:
     df.columns = [_clean(c) for c in df.columns]
     return df
 
+def _looks_like_sheet2(df: pd.DataFrame) -> bool:
+    """Return True if df appears to be the FY-wise SPV/Holdco table."""
+    if df is None or df.empty:
+        return False
+    cols = {re.sub(r"[^a-z0-9]+", "", c.lower()) for c in df.columns}
+    hints = [
+        "financialyear", "fy",
+        "nameofspv", "spv",
+        "nameofholdco", "holdco",
+    ]
+    return any(h in cols for h in hints)
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_sheet2(url: str) -> pd.DataFrame:
     """
-    Load the FY-wise tab (Sheet2) automatically.
+    Load the FY-wise tab (Sheet2) robustly.
 
-    Priority:
-      1) If the incoming URL already has a `gid`, try that tab via CSV endpoints.
-      2) Try common tab names (Sheet2, Sheet 2, FY, SPVs, SPV Map, FY Map) via CSV endpoints.
-
-    Returns empty DF with expected columns if all fail (UI still renders).
+    Strategy:
+      - Try explicit gid from the URL via CSV endpoints.
+      - If what we get *doesn't* look like the FY table, keep trying by sheet name:
+        ("Sheet2", "Sheet 2", "FY", "SPVs", "SPV Map", "FY Map")
+      - Only return a DataFrame once it looks like the FY table.
+      - Else return an empty DF with expected columns.
     """
     expected_cols = ["Financial Year", "Name of REIT", "Name of SPV", "Name of Holdco"]
-
     sid = _sheet_id_from_url(url)
     if not sid:
         return pd.DataFrame(columns=expected_cols)
 
-    # 1) Try explicit gid from URL (most reliable if user copied the Sheet2 URL)
+    candidates: List[str] = []
+
+    # From gid in URL
     gid = _gid_from_url(url)
     if gid:
-        for u in (
+        candidates += [
             f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}",
             f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&gid={gid}",
-        ):
-            try:
-                df = pd.read_csv(u)
-                if isinstance(df, pd.DataFrame) and not df.empty:
-                    df.columns = [_clean(c) for c in df.columns]
-                    return df
-            except Exception:
-                pass
+        ]
 
-    # 2) Try common sheet names using Google's CSV endpoints
-    names = ["Sheet2", "Sheet 2", "FY", "SPVs", "SPV Map", "FY Map"]
-    for nm in names:
-        for u in (
+    # From common sheet names
+    for nm in ["Sheet2", "Sheet 2", "FY", "SPVs", "SPV Map", "FY Map"]:
+        candidates += [
             f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&sheet={nm}",
             f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&sheet={nm}",
-        ):
-            try:
-                df = pd.read_csv(u)
-                if isinstance(df, pd.DataFrame) and not df.empty:
-                    df.columns = [_clean(c) for c in df.columns]
-                    return df
-            except Exception:
-                pass
+        ]
 
+    for u in candidates:
+        try:
+            df = pd.read_csv(u)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df.columns = [_clean(c) for c in df.columns]
+                if _looks_like_sheet2(df):
+                    return df
+        except Exception:
+            pass
+
+    # Nothing matched—return empty with expected headers
     return pd.DataFrame(columns=expected_cols)
 
-# -------------------- column candidates --------------------
+
+# =========================== column maps ==============================
 
 def _map_sheet1(df: pd.DataFrame) -> Dict[str, List[str]]:
     def cands(*names) -> List[str]:
@@ -167,7 +181,8 @@ def _map_sheet2(df: pd.DataFrame) -> Dict[str, List[str]]:
         "holdco":   cands("Name of Holdco", "Holdco", "Holding Company", "Holding Co"),
     }
 
-# -------------------- render --------------------
+
+# ============================== render ================================
 
 def render():
     st.header("Directory")
@@ -186,21 +201,21 @@ def render():
         st.info("Paste a public sheet URL to begin.")
         return
 
-    # Load Sheet1 (entity directory)
+    # ---- Sheet1: core directory ----
     try:
         df1 = _load_sheet1(url)
     except Exception as e:
         st.error(f"Could not load Sheet1. {type(e).__name__}: {e}")
         return
 
-    # Load Sheet2 (FY-wise SPV/HoldCo) – auto-detected
+    # ---- Sheet2: FY-wise SPV/HoldCo (auto-detected) ----
     df2 = _load_sheet2(url)
 
     if df1.empty:
         st.warning("Sheet1 appears empty.")
         return
 
-    # Map primary columns on Sheet1
+    # Map directory columns & entity list
     m1 = _map_sheet1(df1)
     ent_col = _first_nonempty(df1, df1.iloc[0], m1["entity"]) or (m1["entity"][0] if m1["entity"] else None)
     if not ent_col or ent_col not in df1.columns:
@@ -233,7 +248,7 @@ def render():
     co_email  = _clean(row1.get(_first_nonempty(df1, row1, m1["co_email"]) or ""))
     co_mobile = _clean(row1.get(_first_nonempty(df1, row1, m1["co_mobile"]) or ""))
 
-    # ---------- Prepare FY options for the chosen entity (from Sheet2) ----------
+    # ---------- Prepare FY options for chosen entity (from Sheet2) ----------
     fy_options: List[str] = []
     df2_for_ent = pd.DataFrame()
     spv_col = hc_col = None
@@ -260,9 +275,9 @@ def render():
             with st.expander("Show Sheet2 columns detected"):
                 st.write(list(df2.columns))
     else:
-        st.caption("Sheet2 could not be loaded automatically. Ensure the file has a Sheet2 tab or copy a URL with that tab active (so the gid is in the link).")
+        st.caption("Sheet2 could not be auto-loaded. Open the tab in the browser and copy the link so its gid appears in the URL.")
 
-    # ---------- light styles ----------
+    # ---------- light card styles ----------
     st.markdown(
         """
         <style>
@@ -321,7 +336,7 @@ def render():
             unsafe_allow_html=True,
         )
 
-    # ---------- FY selector (placed just above HoldCos / SPVs) ----------
+    # ---------- FY selector (just above HoldCos / SPVs) ----------
     spv_list: List[str] = []
     holdco_list: List[str] = []
     holdco_spvs_map: Dict[str, List[str]] = {}
@@ -329,17 +344,19 @@ def render():
     if fy_options:
         fy = st.selectbox("Financial Year (for SPVs / HoldCos)", fy_options, index=0)
 
-        # Build lists for chosen FY
-        # Re-detect columns (already set above)
-        m2 = _map_sheet2(df2_for_ent)
-        fy_col = next((c for c in m2["fy"] if c in df2_for_ent.columns), None)
+        m2 = _map_sheet2(df2_for_ent if not df2_for_ent.empty else df2)
+        fy_col = next((c for c in m2["fy"] if c in (df2_for_ent.columns if not df2_for_ent.empty else df2.columns)), None)
+
+        use_df = df2_for_ent if not df2_for_ent.empty else df2
         if fy_col:
-            fy_df = df2_for_ent[df2_for_ent[fy_col].astype(str).map(_clean) == _clean(fy)]
+            fy_df = use_df[use_df[fy_col].astype(str).map(_clean) == _clean(fy)]
             if not fy_df.empty:
                 if spv_col and spv_col in fy_df.columns:
                     spv_list = [s for s in fy_df[spv_col].fillna("").astype(str).map(_clean) if s and s != "-"]
                 if hc_col and hc_col in fy_df.columns:
                     holdco_list = [h for h in fy_df[hc_col].fillna("").astype(str).map(_clean) if h and h != "-"]
+
+                # Map HoldCo -> [SPVs]
                 if spv_col and hc_col and spv_col in fy_df.columns and hc_col in fy_df.columns:
                     tmp = fy_df[[hc_col, spv_col]].dropna()
                     for h, group in tmp.groupby(hc_col):
@@ -368,8 +385,19 @@ def render():
 
     with c5:
         if spv_list:
+            # Build reverse map: SPV -> [HoldCo(s)]
+            spv_to_holdcos: Dict[str, List[str]] = {}
+            for h, s_list in holdco_spvs_map.items():
+                for s in s_list:
+                    spv_to_holdcos.setdefault(s, []).append(h)
+
             s_names = sorted(set(spv_list))
-            blocks = [_details_md({"Role": "SPV", "Entity": s}) for s in s_names]
+            blocks = []
+            for s in s_names:
+                extra = {}
+                if s in spv_to_holdcos and spv_to_holdcos[s]:
+                    extra["Part of HoldCo(s)"] = ", ".join(sorted(set(spv_to_holdcos[s])))
+                blocks.append(_details_md({"Role": "SPV", "Entity": s, **extra}))
             _card("SPVs (selected FY)", s_names, blocks)
         else:
             _card("SPVs (selected FY)", ["—"], [_details_md({})])
