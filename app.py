@@ -12,7 +12,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.write("Jump to a section:")
-st.page_link("pages/5_Directory.py", label="📇 Directory", icon="📇")
+st.page_link("pages/5_Directory.py", label="📇 Basic Details", icon="📇")
 st.page_link("pages/1_Fund_Raising.py", label="💰 Fund Raising", icon="💰")
 st.page_link("pages/2_Borrowings.py",   label="🏦 Borrowings",   icon="🏦")
 st.page_link("pages/3_Trading.py",      label="📈 Trading",      icon="📈")
