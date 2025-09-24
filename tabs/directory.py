@@ -185,7 +185,7 @@ def _map_sheet2(df: pd.DataFrame) -> Dict[str, List[str]]:
 # ============================== render ================================
 
 def render():
-    st.header("Directory")
+    st.header("Basic Details")
 
     seg = st.selectbox("Segment", ["REIT", "InvIT"], index=0)
     default_url = DEFAULT_REIT_DIR_URL if seg == "REIT" else DEFAULT_INVIT_DIR_URL
