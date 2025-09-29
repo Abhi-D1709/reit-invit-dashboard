@@ -12,8 +12,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.write("Jump to a section:")
-st.page_link("pages/5_Directory.py", label="📇 Basic Details", icon="📇")
-st.page_link("pages/1_Fund_Raising.py", label="💰 Fund Raising", icon="💰")
-st.page_link("pages/2_Borrowings.py",   label="🏦 Borrowings",   icon="🏦")
-st.page_link("pages/3_Trading.py",      label="📈 Trading",      icon="📈")
-st.page_link("pages/4_NDCF.py",         label="📄 NDCF",         icon="📄")
+st.page_link("pages/1_Basic_Details.py", label="📇 Basic Details", icon="📇")
+st.page_link("pages/2_Fund_Raising.py", label="💰 Fund Raising", icon="💰")
+st.page_link("pages/3_Borrowings.py",   label="🏦 Borrowings",   icon="🏦")
+st.page_link("pages/4_Trading.py",      label="📈 Trading",      icon="📈")
+st.page_link("pages/5_NDCF.py",         label="📄 NDCF",         icon="📄")

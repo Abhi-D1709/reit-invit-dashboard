@@ -16,13 +16,19 @@ DEFAULT_INVIT_BORR_URL = "https://docs.google.com/spreadsheets/d/1Zqi5VWeS2GSfhW
 DEFAULT_REIT_FUND_URL  = "https://docs.google.com/spreadsheets/d/1cuH2odCdJpnP5E0trvroQWzB4rXFgWGpjhHcAuX81Hs/edit?usp=sharing"
 DEFAULT_INVIT_FUND_URL = "https://docs.google.com/spreadsheets/d/1eepPHnjo31G3ueeQTGxmVT7iY9cXh3NRgpDJuq6ygS8/edit?usp=sharing"
 
-# NEW: Directory (REIT / InvIT) – used only by tabs/directory.py
+# Basic_Details (REIT / InvIT) – used only by tabs/basic_details.py
 DEFAULT_REIT_DIR_URL   = "https://docs.google.com/spreadsheets/d/1PnuNGHDskqBZt4WUO8JpmssaQ3nOUvLJolfwB7T5zDE/edit?usp=sharing"
 DEFAULT_INVIT_DIR_URL  = ""  # fill when your InvIT directory sheet is ready
 
 # Trading entities (REIT/InvIT mapping) — you can change this sheet anytime
 ENTITIES_SHEET_ID = "1g44Lkv3VZU4FDTzrWXKhdxGwrWecZHHrZLmuRMyFHDI"
 ENTITIES_SHEET_CSV = f"https://docs.google.com/spreadsheets/d/{ENTITIES_SHEET_ID}/export?format=csv"
+
+# Sponsor Holding (REIT) – Sheet3 (gid=1466135872) of your master sheet
+DEFAULT_REIT_SPON_URL  = "https://docs.google.com/spreadsheets/d/1PnuNGHDskqBZt4WUO8JpmssaQ3nOUvLJolfwB7T5zDE/export?format=csv&gid=1466135872"
+
+# Sponsor Holding (InvIT) – set this when your InvIT sheet is ready
+DEFAULT_INVIT_SPON_URL = ""
 
 # Canonical internal names
 ENT_COL = "__Entity__"
