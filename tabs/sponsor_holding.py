@@ -197,12 +197,12 @@ def render():
     if isinstance(list_dt, date):
         within_3yrs = (_years_between(list_dt, fy_end) < 3.0)
 
-    # Rule 1: first 3 years — Sponsor+Group ≥ 25%
+    # Rule 1: first 3 years — Sponsor+Group ≥ 15%
     if within_3yrs:
-        if not math.isnan(s_pct) and (s_pct + EPS) < 0.25:
-            st.error(f"ALERT: Within first 3 years of listing — Sponsor+Group holding is {s_pct*100:.2f}% (< 25%).")
+        if not math.isnan(s_pct) and (s_pct + EPS) < 0.15:
+            st.error(f"ALERT: Within first 3 years of listing — Sponsor+Group holding is {s_pct*100:.2f}% (< 15%).")
         else:
-            st.success("Within first 3 years of listing — Sponsor+Group requirement (≥ 25%) satisfied.")
+            st.success("Within first 3 years of listing — Sponsor+Group requirement (≥ 15%) satisfied.")
     # Rule 2: after 3 years — Public ≥ 25%
     else:
         if not math.isnan(p_pct) and (p_pct + EPS) < 0.25:
