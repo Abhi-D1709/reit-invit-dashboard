@@ -140,44 +140,47 @@ def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """
-    NSE fetcher using NextApi/GetQuoteApi with csv=true.
-    Includes on-screen feedback for debugging.
-    """
     if start > end: return pd.DataFrame(columns=["date", "close", "volume"])
 
+    # --- 1. PASTE THE HEADERS FROM YOUR CURL COMMAND HERE ---
+    # I have pre-filled this with the specific cookies from your curl command.
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://www.nseindia.com/',
-        'Accept': '*/*'
+        "authority": "www.nseindia.com",
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9,en-IN;q=0.8",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+        "referer": "https://www.nseindia.com/get-quote/equity/EMBASSY/Embassy-Office-Parks-REIT",
+        # The 'Cookie' header is the most important part. It acts as your "ID card".
+        "cookie": (
+            "_ga=GA1.1.771385566.1703595019; "
+            "_ga_WM2NSQKJEK=GS1.1.1742911456.20.1.1742912585.0.0.0; "
+            "nsit=klz3c4xBmbD_Z4Dlo-48T2o7; "
+            "AKA_A2=A; "
+            "_abck=28A4C92C3BEB62EED2D4D7202702E0F8~0~YAAQJPhWuHEQ1AabAQAAajCUBw+k6eGYL9Ew3E9onIivQQXQpEHSFV6kS6sHIMVuiShyEIVZf2ul3vjE7+1VUAcDPjfyf9N/nLt77rKkVehLYgKBkjSGZZwTsyKtCWMFfTkoehMk0yoEEmHcxbe0jF+8EnjxT+mjDVwBeyBHO+6E542Oirp8wvmTLYj2rBLYf+UAdAewe84RZ8ka7UspsLl8JMETrdTtQSwTKtWiZRwKDZBUhNNpQJgyzxUvsT/0uTieG1QusNv4fqcC6/b/aL8UUntJD9VCxyzIWfHLOD2SXqpbWe2KGC23QTAsubR8EsoRVE0HKGH/3tpD6kVURgkeQvLGoUxBdsL8avavdyB+S1KXqbTvyLTvg45h3jYthFAggLxiu9xpzX90JDJVQCfKS0BrGTdr1rC7wiwQq4p/JMOBsY1kugtrWsEgYd0FN1yWNXZii3KGuLLbId9fY8S43cMqN1B6z1J8TqZH3iA2TEcIJAQS3fYzaM+V1Qqvvu2vmU8znl+Hui1Ix9Hm2AQLtQREKg==~-1~-1~-1; "
+            "bm_sz=F8FA68B4BC100914D5C601369DC90FDB~YAAQh/hWuFPUy6yaAQAALQuTBx6EsGC7Ha17nAfhEjihFpGqmro9u0sW+ipyMie3e0/uqkAXVk+GEkkorur8PjIDwDknzxKN/5fzp+YYVZ/82Jwobizyxl/waQ9S8UuQiJ+Lo9L60+L2Qd+rz32qz7ceZnp+vk7eXxZdcKPtiGlieNu7bkXMXWlE/yrqSJ2Bls4gHS8CcDmz558Y0McIhGHs2LVZwpJW2zio9E4sh5OE9G4DKeTGVKWt6ebGh0yTKObQfANltsnXiutmvF2q6sL3mcEpbbXqumuqHasqtDqgBhetQKm0tHvmMmFcSBSVDothexVmjEmEqZUjHpLM6dJz9YqGF8CaFIn+gMFfa2ojsWDV2PsQPYKCzjF8xAF9SF45CJOZJxcY2VHyCqF3p2YVV6EXyeNb++vdEgapK6P7PcE4l96WgbTusPuc0yrQh4rF3mc5+3Kqbwf/vDNEdynXV/hqMc+LPWELbpc/iXw53TlWUw==~3682885~4600388"
+        )
     }
 
     session = requests.Session()
+    # We update headers but DO NOT visit the homepage first, 
+    # because we are manually supplying the valid session cookies.
     session.headers.update(headers)
-    try:
-        session.get("https://www.nseindia.com", timeout=10)
-    except Exception:
-        pass 
 
     def fetch_chunk(d1, d2):
-        # DEBUG: Show what URL we are hitting
+        # Using the exact URL structure from your curl
         url = f"https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getHistoricalTradeData&symbol={symbol}&series={series}&fromDate={d1.strftime('%d-%m-%Y')}&toDate={d2.strftime('%d-%m-%Y')}&csv=true"
-        
-        # --- DEBUG LOGGING ON UI ---
-        # st.code(f"GET {url}", language="http")
         
         try:
             r = session.get(url, timeout=15)
             
-            if r.status_code != 200:
-                st.error(f"⚠️ NSE Fetch Failed ({r.status_code}) for {symbol}: {url}")
+            if r.status_code == 403:
+                st.error(f"⚠️ 403 Forbidden: The cookies have expired. Please grab a new CURL from the website.")
                 return pd.DataFrame()
-
+                
             r.raise_for_status()
             
             csv_text = r.text
             if not csv_text or "Date" not in csv_text:
-                st.warning(f"⚠️ NSE returned empty/invalid CSV for {symbol}")
                 return pd.DataFrame()
                 
             df = pd.read_csv(io.StringIO(csv_text))
@@ -185,18 +188,16 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
             
             col_map = {c.lower(): c for c in df.columns}
             if 'date' not in col_map or 'close' not in col_map or 'volume' not in col_map:
-                st.error(f"⚠️ Missing columns in NSE response. Found: {df.columns.tolist()}")
                 return pd.DataFrame()
 
             df["date"] = pd.to_datetime(df[col_map['date']], errors="coerce").dt.date
             df["close"] = pd.to_numeric(df[col_map['close']].astype(str).str.replace(',', ''), errors="coerce")
             df["volume"] = pd.to_numeric(df[col_map['volume']].astype(str).str.replace(',', ''), errors="coerce")
             
-            result = df[["date", "close", "volume"]].dropna()
-            return result
+            return df[["date", "close", "volume"]].dropna()
 
         except Exception as e:
-            st.error(f"❌ Exception fetching NSE chunk {d1}-{d2}: {e}")
+            st.error(f"❌ Error: {e}")
             return pd.DataFrame()
 
     CHUNK_DAYS = 365
@@ -208,15 +209,12 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
         current_end = current_start - dt.timedelta(days=1)
     
     parts = [fetch_chunk(s, e) for s, e in windows]
-    
     valid_parts = [p for p in parts if not p.empty]
+    
     if not valid_parts: 
-        # Only warn if truly no data found across all chunks
-        # st.info(f"ℹ️ No valid data found for {symbol} (checked {len(parts)} time windows).")
         return pd.DataFrame(columns=["date", "close", "volume"])
     
     return pd.concat(valid_parts, ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
-
 
 # -------------------------- one-entity fetch --------------------------
 def fetch_single_entity(
