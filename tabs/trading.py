@@ -3,12 +3,11 @@ import json
 import re
 import datetime as dt
 import io
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
-# import requests  <-- We replace standard requests with curl_cffi
-from curl_cffi import requests as crequests 
+import requests  # Reverted to standard requests
 import streamlit as st
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
@@ -107,102 +106,97 @@ def clamp_dates(start: dt.date, end: dt.date) -> Tuple[dt.date, dt.date]:
 # --------------------------- live fetchers ---------------------------
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """Standard requests fetcher for BSE (Restored to working version)"""
     scripcode = _normalize_bse_code(scripcode or "")
     if not scripcode: return pd.DataFrame(columns=["date", "close", "volume"])
-    url = f"https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w?scripcode={scripcode}&flag=1&fromdate={start.strftime('%Y%m%d')}&todate={end.strftime('%Y%m%d')}&seriesid="
     
-    # Use curl_cffi for BSE as well to be safe
+    url = f"https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w?scripcode={scripcode}&flag=1&fromdate={start.strftime('%Y%m%d')}&todate={end.strftime('%Y%m%d')}&seriesid="
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.bseindia.com/"}
+    
     try:
-        session = crequests.Session(impersonate="chrome")
-        r = session.get(url, timeout=15)
-        r.raise_for_status()
-        
-        raw_data = r.json().get("Data", "[]")
-        series = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
-        
-        if not isinstance(series, list) or not series:
-            return pd.DataFrame(columns=["date", "close", "volume"])
-        
-        df = pd.DataFrame(series)
-        if df.empty: return df
-
-        required_cols = ["dttm", "vale1", "vole"]
-        if not all(col in df.columns for col in required_cols):
-            return pd.DataFrame(columns=["date", "close", "volume"])
-
-        df["date"] = pd.to_datetime(df["dttm"], errors="coerce").dt.date
-        df["close"] = pd.to_numeric(df["vale1"], errors="coerce")
-        df["volume"] = pd.to_numeric(df["vole"], errors="coerce")
-        
-        return df[["date", "close", "volume"]].dropna().sort_values("date")
+        with requests.Session() as s:
+            s.get("https://www.bseindia.com/", timeout=10) # Handshake
+            r = s.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
             
-    except Exception as e:
-        # Silently fail for BSE if needed, or log
+            raw_data = r.json().get("Data", "[]")
+            series = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+            
+            if not isinstance(series, list) or not series:
+                return pd.DataFrame(columns=["date", "close", "volume"])
+            
+            df = pd.DataFrame(series)
+            if df.empty: return df
+
+            required_cols = ["dttm", "vale1", "vole"]
+            if not all(col in df.columns for col in required_cols):
+                return pd.DataFrame(columns=["date", "close", "volume"])
+
+            df["date"] = pd.to_datetime(df["dttm"], errors="coerce").dt.date
+            df["close"] = pd.to_numeric(df["vale1"], errors="coerce")
+            df["volume"] = pd.to_numeric(df["vole"], errors="coerce")
+            
+            return df[["date", "close", "volume"]].dropna().sort_values("date")
+            
+    except Exception:
         return pd.DataFrame(columns=["date", "close", "volume"])
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
-def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date, user_cookie: str = "") -> pd.DataFrame:
     """
-    Fetches NSE data using curl_cffi to bypass TLS fingerprinting (403 Errors).
+    Fetches NSE data. Uses user-provided cookie to bypass 403 Forbidden errors.
     """
     if start > end: return pd.DataFrame(columns=["date", "close", "volume"])
 
-    # 1. Initialize 'Chrome' Session
-    # This acts exactly like a real Chrome browser at the network layer.
-    session = crequests.Session(impersonate="chrome")
-    
-    # 2. Visit Homepage (Get Cookies)
-    try:
-        home = session.get("https://www.nseindia.com", timeout=20)
-        if home.status_code != 200:
-            st.error(f"⚠️ NSE Homepage Blocked ({home.status_code})")
-            return pd.DataFrame()
-    except Exception as e:
-        st.error(f"⚠️ Connection Error: {e}")
-        return pd.DataFrame()
+    # Base Headers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "*/*"
+    }
 
-    # 3. Fetch Data in Chunks
+    # INJECT USER COOKIE IF PROVIDED
+    if user_cookie.strip():
+        # Minimal cleaning if they pasted a full curl command header like "Cookie: xxxx"
+        clean_cookie = user_cookie
+        if "Cookie:" in clean_cookie:
+            clean_cookie = clean_cookie.split("Cookie:", 1)[1].strip()
+        headers["Cookie"] = clean_cookie
+
+    session = requests.Session()
+    session.headers.update(headers)
+
     def fetch_chunk(d1, d2):
-        # IMPORTANT: NSE checks the Referer header strictly
-        headers = {
-            "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}",
-            "X-Requested-With": "XMLHttpRequest"
-        }
-        
         url = f"https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getHistoricalTradeData&symbol={symbol}&series={series}&fromDate={d1.strftime('%d-%m-%Y')}&toDate={d2.strftime('%d-%m-%Y')}&csv=true"
         
         try:
-            r = session.get(url, headers=headers, timeout=15)
+            r = session.get(url, timeout=10)
             
-            if r.status_code == 200:
-                csv_text = r.text
-                if not csv_text or "Date" not in csv_text:
-                    return pd.DataFrame()
-
-                df = pd.read_csv(io.StringIO(csv_text))
-                
-                # Clean columns
-                df.columns = [c.strip().replace('"', '') for c in df.columns]
-                col_map = {c.lower(): c for c in df.columns}
-                
-                if 'date' not in col_map: return pd.DataFrame()
-
-                df["date"] = pd.to_datetime(df[col_map['date']], errors="coerce").dt.date
-                df["close"] = pd.to_numeric(df[col_map['close']].astype(str).str.replace(',', ''), errors="coerce")
-                df["volume"] = pd.to_numeric(df[col_map['volume']].astype(str).str.replace(',', ''), errors="coerce")
-                
-                return df[["date", "close", "volume"]].dropna()
-            
-            elif r.status_code == 403:
-                st.warning(f"⚠️ NSE 403 (Access Denied) for {symbol}")
+            if r.status_code == 403:
+                # If 403, it means the cookie is missing or expired.
                 return pd.DataFrame()
-                
+            
+            r.raise_for_status()
+            csv_text = r.text
+            if not csv_text or "Date" not in csv_text: return pd.DataFrame()
+
+            df = pd.read_csv(io.StringIO(csv_text))
+            df.columns = [c.strip().replace('"', '') for c in df.columns]
+            col_map = {c.lower(): c for c in df.columns}
+            
+            if 'date' not in col_map: return pd.DataFrame()
+
+            df["date"] = pd.to_datetime(df[col_map['date']], errors="coerce").dt.date
+            df["close"] = pd.to_numeric(df[col_map['close']].astype(str).str.replace(',', ''), errors="coerce")
+            df["volume"] = pd.to_numeric(df[col_map['volume']].astype(str).str.replace(',', ''), errors="coerce")
+            
+            return df[["date", "close", "volume"]].dropna()
+
+        except Exception:
             return pd.DataFrame()
 
-        except Exception as e:
-            st.error(f"❌ Chunk Error: {e}")
-            return pd.DataFrame()
-
+    # Chunking logic (NSE allows max 365 days)
     CHUNK_DAYS = 360
     windows = []
     current_end = end
@@ -224,13 +218,14 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
 
 # -------------------------- one-entity fetch --------------------------
 def fetch_single_entity(
-    row: pd.Series, start: dt.date, end: dt.date, monthly_mode: bool
+    row: pd.Series, start: dt.date, end: dt.date, monthly_mode: bool, nse_cookie: str
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     
     sym, series, scrip = row.get("NSE Symbol", ""), row.get("NSE Series", ""), row.get("BSE Scrip Code", "")
     
     if sym and series:
-        nse_df = get_nse_data(sym, series, start, end)
+        # Pass the cookie specifically to NSE fetcher
+        nse_df = get_nse_data(sym, series, start, end, user_cookie=nse_cookie)
     else:
         nse_df = pd.DataFrame(columns=["date", "close", "volume"])
         
@@ -252,6 +247,12 @@ def fetch_single_entity(
 # -------------------------- UI Components --------------------------
 def render_sidebar(entities_df: pd.DataFrame):
     st.markdown("### Trading — Controls")
+    
+    # --- New Settings Box for Manual Cookie ---
+    with st.expander("⚙️ Connection Settings (NSE)", expanded=False):
+        st.caption("If NSE data fails (403), paste the 'Cookie' header from your browser network tab here.")
+        nse_cookie = st.text_area("NSE Cookie String", height=100, help="Paste the value of the 'cookie' header from a valid request to nseindia.com")
+
     start, end = clamp_dates(
         st.date_input("From", value=dt.date(2024, 4, 1), format="DD/MM/YYYY", key="trade_from"),
         st.date_input("To", value=dt.date.today(), format="DD/MM/YYYY", key="trade_to")
@@ -264,16 +265,18 @@ def render_sidebar(entities_df: pd.DataFrame):
         if not entities_df.empty:
             entity_name = st.selectbox("Select Entity", entities_df["Name of Entity"].tolist(), index=0)
     
-    return mode, start, end, (monthly_mode or mode != "Single Entity"), entity_name
+    return mode, start, end, (monthly_mode or mode != "Single Entity"), entity_name, nse_cookie
 
-def render_single_entity_view(row, start_date, end_date, monthly_mode):
+def render_single_entity_view(row, start_date, end_date, monthly_mode, nse_cookie):
     st.subheader(f"Entity View: {row['Name of Entity']}")
-    nse_df, bse_df = fetch_single_entity(row, start_date, end_date, monthly_mode)
+    nse_df, bse_df = fetch_single_entity(row, start_date, end_date, monthly_mode, nse_cookie)
     
     c1, c2 = st.columns(2, gap="large")
     with c1:
         title = f"NSE • {row.get('NSE Symbol', '')}" + (" (Monthly)" if monthly_mode else "")
-        if nse_df is None or nse_df.empty: st.warning("NSE: No data for this period.")
+        if nse_df is None or nse_df.empty: 
+            st.warning("NSE: No data for this period.")
+            if not nse_cookie: st.info("ℹ️ Try pasting a valid Cookie in 'Connection Settings' in the sidebar.")
         else:
             st.plotly_chart(line_bar_figure(nse_df, title, monthly=monthly_mode), use_container_width=True)
             st.dataframe(nse_df, use_container_width=True, hide_index=True)
@@ -291,7 +294,8 @@ def render():
     entities_all = load_entities(ENTITIES_SHEET_CSV)
     
     with st.sidebar:
-        mode, start_date, end_date, monthly_mode, entity_name = render_sidebar(entities_all)
+        # Now returns nse_cookie as well
+        mode, start_date, end_date, monthly_mode, entity_name, nse_cookie = render_sidebar(entities_all)
 
     if entities_all.empty:
         st.error("Could not load entities list. Please check the CSV URL in the sidebar."); return
@@ -300,7 +304,7 @@ def render():
         if not entity_name:
             st.info("Select an entity from the sidebar to begin."); return
         selected_row = entities_all[entities_all["Name of Entity"] == entity_name].iloc[0]
-        render_single_entity_view(selected_row, start_date, end_date, monthly_mode)
+        render_single_entity_view(selected_row, start_date, end_date, monthly_mode, nse_cookie)
     
     else: # Group View
         group_type = "REIT" if mode == "All REITs" else "InvIT"
@@ -315,7 +319,8 @@ def render():
             with ThreadPoolExecutor(max_workers=8) as executor:
                 future_map = {}
                 for _, r in rows_to_fetch.iterrows():
-                    f = executor.submit(fetch_single_entity, r, start_date, end_date, False)
+                    # Pass the cookie here as well
+                    f = executor.submit(fetch_single_entity, r, start_date, end_date, False, nse_cookie)
                     add_script_run_ctx(f)
                     future_map[f] = r
 
