@@ -4,3 +4,4 @@ numpy>=1.24
 requests>=2.31
 altair>=5.0
 plotly>=5.19
+yfinance
