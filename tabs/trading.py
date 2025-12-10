@@ -349,19 +349,20 @@ def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     """
-    Behavior:
-      • If (end - start) ≤ 365 days: single call for the whole period.
-      • If > 1 year: build ≤1-year windows **backwards**:
-            [end-364→end], then [end-728→end-365], …, down to start.
-        Fetch sequentially with browser-like headers, session warm-up, and retries.
-      • After first pass, do one monthly gap-refill for any missing months.
+    NSE historical fetch with strict ≤1-year windows:
+      • If (end - start) ≤ 365 days: single call.
+      • If > 1 year: build ≤360-day windows backwards: [end-359→end], [end-719→end-360], ...
+      • If any window returns 403 or 'not more than 1 Year', recursively split that window.
+      • One-time monthly gap refill at the end (some months randomly come back empty on Cloud).
+    Returns df[date, close, volume] sorted by date.
     """
+    if not symbol or not series:
+        return pd.DataFrame(columns=["date", "close", "volume"])
+
     if start > end:
         start, end = end, end
 
-    total_days = (end - start).days
-
-    # Stronger headers for Streamlit Cloud
+    # Browser-like headers for Streamlit Cloud
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -384,7 +385,7 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
     def empty_df() -> pd.DataFrame:
         return pd.DataFrame(columns=["date", "close", "volume"])
 
-    # Reuse one session across all ranges
+    # One session reused across all calls
     sess = requests.Session()
     sess.headers.update(headers)
     try:
@@ -392,33 +393,45 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
     except Exception:
         pass
 
-    def fetch_range(d1: dt.date, d2: dt.date) -> pd.DataFrame:
+    def _fetch_range(d1: dt.date, d2: dt.date, depth: int = 0) -> pd.DataFrame:
+        """Fetch a single range; on 403/1-year error, split recursively."""
         url = (
             "https://www.nseindia.com/api/historicalOR/cm/equity"
             f"?symbol={symbol}&series={series_json}&from={d1.strftime('%d-%m-%Y')}&to={d2.strftime('%d-%m-%Y')}"
         )
+
         last_err = None
-        for _ in range(4):  # a little more persistent on Cloud
+        for _ in range(5):
             try:
                 r = sess.get(url, timeout=25)
+                # Explicitly treat 403 as split-worthy (Cloud throttling)
+                if r.status_code == 403:
+                    raise requests.HTTPError("403 Forbidden", response=r)
+
                 r.raise_for_status()
                 j = r.json()
+
+                # NSE "not more than 1 Year" guard
                 if j.get("error"):
                     msg = str(j.get("showMessage") or "")
+                    if "not more than 1 Year" in msg:
+                        # Force split below
+                        raise ValueError("Range exceeds 1 year (server)")
+
                     if "No record" in msg or "No records" in msg:
                         return empty_df()
-                    # If server complains about >1y, we split via windows anyway
+
                     raise ValueError(msg or "NSE API error")
 
                 data = j.get("data", [])
                 if not isinstance(data, list) or not data:
-                    # Treat empty payload as transient; retry
+                    # Often transient empty payloads—retry
                     raise ValueError("Empty data list")
 
                 df = pd.DataFrame(data)
                 needed = {"CH_TIMESTAMP", "CH_CLOSING_PRICE", "CH_TOT_TRADED_QTY"}
                 if not needed.issubset(df.columns):
-                    raise ValueError("Unexpected schema")
+                    raise ValueError("Unexpected schema from NSE")
 
                 df["date"] = pd.to_datetime(df["CH_TIMESTAMP"], errors="coerce").dt.date
                 df["close"] = pd.to_numeric(df["CH_CLOSING_PRICE"], errors="coerce")
@@ -427,44 +440,55 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
 
             except Exception as e:
                 last_err = e
-                # Re-warm cookies and backoff
+                # On failure, try re-warming cookies and back off
                 try:
                     sess.get("https://www.nseindia.com", timeout=20)
                 except Exception:
                     pass
-                time.sleep(0.6 + random.random() * 0.7)
+                time.sleep(0.7 + random.random() * 0.8)
 
-        # Final give-up for this window
+        # If we failed all retries: split the window if it is > 45 days OR if server hinted 1-year limit or 403
+        span = (d2 - d1).days
+        if span > 45 and isinstance(last_err, (requests.HTTPError, ValueError)):
+            # Split window in half and try both sides
+            mid = d1 + dt.timedelta(days=span // 2)
+            left = _fetch_range(d1, mid, depth + 1)
+            right = _fetch_range(mid + dt.timedelta(days=1), d2, depth + 1)
+            if not left.empty or not right.empty:
+                return pd.concat([left, right], ignore_index=True)
+        # Give up on this window
         st.warning(f"NSE {d1:%d %b %Y} → {d2:%d %b %Y}: {type(last_err).__name__}: {last_err}")
         return empty_df()
 
-    # Build windows
-    windows: List[Tup[dt.date, dt.date]] = []
+    # Build windows: ≤360 days when period > 1 year, else just one window
+    total_days = (end - start).days
     if total_days <= 365:
-        windows.append((start, end))
+        windows = [(start, end)]
     else:
+        windows: List[Tuple[dt.date, dt.date]] = []
         e = end
         while e >= start:
-            s = max(start, e - dt.timedelta(days=364))
+            s = max(start, e - dt.timedelta(days=360))
             windows.append((s, e))
             e = s - dt.timedelta(days=1)
 
-    # Fetch sequentially (less likely to trigger rate limits)
+    # Sequential fetch to avoid rate limits
     parts: List[pd.DataFrame] = []
     for (d1, d2) in windows:
-        dfp = fetch_range(d1, d2)
+        dfp = _fetch_range(d1, d2)
         if not dfp.empty:
             parts.append(dfp)
 
     out = pd.concat(parts, ignore_index=True) if parts else empty_df()
 
-    # Monthly gap refill (sometimes a month comes back empty on Cloud)
+    # Monthly gap refill (helps when a month intermittently returns empty on Cloud)
     if not out.empty:
         def first_of_month(d: dt.date) -> dt.date:
             return dt.date(d.year, d.month, 1)
-        expected_ym = {(d.year, d.month) for d in pd.date_range(first_of_month(start), first_of_month(end), freq="MS").date}
+
+        exp_ym = {(d.year, d.month) for d in pd.date_range(first_of_month(start), first_of_month(end), freq="MS").date}
         have_ym = {(d.year, d.month) for d in pd.to_datetime(out["date"]).dt.date}
-        missing = sorted(expected_ym - have_ym)
+        missing = sorted(exp_ym - have_ym)
         if missing:
             retry_parts: List[pd.DataFrame] = []
             for (yy, mm) in missing:
@@ -473,7 +497,7 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
                 d1 = max(d1, start)
                 d2 = min(d2, end)
                 if d1 <= d2:
-                    retry_parts.append(fetch_range(d1, d2))
+                    retry_parts.append(_fetch_range(d1, d2))
             retry_parts = [p for p in retry_parts if not p.empty]
             if retry_parts:
                 out = pd.concat([out] + retry_parts, ignore_index=True)
@@ -488,7 +512,6 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
            .astype({"close": "float64", "volume": "float64"})
     )
     return out
-
 
 # ============================== Multi-entity helpers ==============================
 def fetch_single_entity(
