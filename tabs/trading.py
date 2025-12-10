@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import requests
 import streamlit as st
-import yfinance as yf  # <--- Added for stable NSE data
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 from streamlit.runtime.scriptrunner import add_script_run_ctx
@@ -142,56 +141,102 @@ def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     """
-    Fetches NSE data using yfinance to avoid 403 Forbidden errors.
-    Automatically handles symbol suffix and column formatting.
+    Fetches data directly from NSE by emulating a browser session to auto-renew cookies.
     """
     if start > end: return pd.DataFrame(columns=["date", "close", "volume"])
 
-    # Yahoo Finance requires '.NS' for NSE symbols (e.g. EMBASSY -> EMBASSY.NS)
-    clean_symbol = symbol.strip().upper()
-    if not clean_symbol.endswith(".NS"):
-        ticker_symbol = f"{clean_symbol}.NS"
-    else:
-        ticker_symbol = clean_symbol
+    # 1. Define standard browser headers
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive"
+    }
 
+    session = requests.Session()
+    session.headers.update(base_headers)
+
+    # 2. Initialize Session (Crucial Step)
+    # We must visit the homepage first to let NSE assign us a valid cookie (nsit, _abck, etc.)
     try:
-        # We add 1 day to 'end' because yfinance end date is exclusive
-        df = yf.download(
-            ticker_symbol, 
-            start=start, 
-            end=end + dt.timedelta(days=1), 
-            progress=False,
-            auto_adjust=False  # Keep Close as actual close, not adjusted
-        )
+        # print("--- Initializing NSE Session ---")
+        home_resp = session.get("https://www.nseindia.com", timeout=20)
         
-        if df.empty:
+        if home_resp.status_code != 200:
+            st.error(f"⚠️ Could not connect to NSE Homepage (Status: {home_resp.status_code})")
             return pd.DataFrame(columns=["date", "close", "volume"])
-
-        # Reset index to make 'Date' a proper column
-        df = df.reset_index()
-        
-        # Flatten MultiIndex columns if present (common in newer yfinance versions)
-        if isinstance(df.columns, pd.MultiIndex):
-             df.columns = df.columns.get_level_values(0)
-
-        # Normalize column names to lowercase
-        df.columns = [c.lower() for c in df.columns]
-        
-        # Ensure we have the columns we need
-        if 'date' not in df.columns or 'close' not in df.columns or 'volume' not in df.columns:
-            return pd.DataFrame(columns=["date", "close", "volume"])
-
-        # Final Type Conversions
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-        
-        return df[["date", "close", "volume"]].dropna().sort_values("date")
-
+            
     except Exception as e:
-        st.error(f"Data fetch error for {symbol}: {e}")
+        st.error(f"⚠️ Connection error initializing session: {e}")
         return pd.DataFrame(columns=["date", "close", "volume"])
 
+    # 3. Define the Fetcher
+    def fetch_chunk(d1, d2):
+        # The API requires the 'Referer' header to be set to the stock page
+        api_headers = {
+            "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        
+        url = f"https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getHistoricalTradeData&symbol={symbol}&series={series}&fromDate={d1.strftime('%d-%m-%Y')}&toDate={d2.strftime('%d-%m-%Y')}&csv=true"
+        
+        try:
+            # Update headers just for this request
+            r = session.get(url, headers=api_headers, timeout=15)
+            
+            if r.status_code == 200:
+                # Success! Parse CSV
+                csv_text = r.text
+                if not csv_text or "Date" not in csv_text:
+                    return pd.DataFrame()
+
+                df = pd.read_csv(io.StringIO(csv_text))
+                
+                # Clean Column Names (Strip whitespace and quotes)
+                df.columns = [c.strip().replace('"', '') for c in df.columns]
+                col_map = {c.lower(): c for c in df.columns}
+
+                # Validation
+                if 'date' not in col_map or 'close' not in col_map or 'volume' not in col_map:
+                    return pd.DataFrame()
+
+                # Processing
+                df["date"] = pd.to_datetime(df[col_map['date']], errors="coerce").dt.date
+                df["close"] = pd.to_numeric(df[col_map['close']].astype(str).str.replace(',', ''), errors="coerce")
+                df["volume"] = pd.to_numeric(df[col_map['volume']].astype(str).str.replace(',', ''), errors="coerce")
+
+                return df[["date", "close", "volume"]].dropna()
+
+            elif r.status_code == 401 or r.status_code == 403:
+                st.warning(f"⚠️ NSE Access Denied ({r.status_code}) for {symbol}. Session may have expired.")
+                return pd.DataFrame()
+            else:
+                return pd.DataFrame()
+
+        except Exception as e:
+            st.error(f"❌ Error fetching chunk {d1}-{d2}: {e}")
+            return pd.DataFrame()
+
+    # 4. Loop through dates (NSE allows max 365 days per call)
+    CHUNK_DAYS = 360
+    windows = []
+    current_end = end
+    while current_end >= start:
+        current_start = max(start, current_end - dt.timedelta(days=CHUNK_DAYS))
+        windows.append((current_start, current_end))
+        current_end = current_start - dt.timedelta(days=1)
+    
+    parts = []
+    for s_date, e_date in windows:
+        # Add a small delay between chunks to avoid rate limiting
+        part = fetch_chunk(s_date, e_date)
+        if not part.empty:
+            parts.append(part)
+    
+    if not parts: 
+        return pd.DataFrame(columns=["date", "close", "volume"])
+    
+    return pd.concat(parts, ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
 
 # -------------------------- one-entity fetch --------------------------
 def fetch_single_entity(
