@@ -1,19 +1,25 @@
 # tabs/trading.py
 import json
 import re
+import time
+import random
 import datetime as dt
-import io
-from typing import Optional, Tuple
+from decimal import Decimal, InvalidOperation
+from typing import Optional, Tuple, List, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
-import requests  # Reverted to standard requests
+import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
-from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from utils.common import ENTITIES_SHEET_CSV
+from utils.db import (
+    sb_upsert_trades, sb_dates_in_range, sb_months_in_range,
+    sb_load_range, month_ranges_to_fetch, month_ranges_missing_months,
+    sb_healthcheck, sb_max_date_for_key,
+)
 
 # --------------------------- utilities ---------------------------
 def _clean_str(x):
@@ -103,31 +109,42 @@ def clamp_dates(start: dt.date, end: dt.date) -> Tuple[dt.date, dt.date]:
     if start > end: start = end
     return start, end
 
+def _tail_windows(start: dt.date, end: dt.date, max_dt: Optional[dt.date], monthly: bool):
+    if max_dt is None: return [(start, end)]
+    if monthly:
+        nm_year, nm_month = (max_dt.year + 1, 1) if max_dt.month == 12 else (max_dt.year, max_dt.month + 1)
+        d1 = max(dt.date(nm_year, nm_month, 1), start)
+    else:
+        d1 = max(max_dt + dt.timedelta(days=1), start)
+    return [(d1, end)] if d1 <= end else []
+
 # --------------------------- live fetchers ---------------------------
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """Standard requests fetcher for BSE (Restored to working version)"""
     scripcode = _normalize_bse_code(scripcode or "")
     if not scripcode: return pd.DataFrame(columns=["date", "close", "volume"])
-    
     url = f"https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w?scripcode={scripcode}&flag=1&fromdate={start.strftime('%Y%m%d')}&todate={end.strftime('%Y%m%d')}&seriesid="
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.bseindia.com/"}
-    
     try:
         with requests.Session() as s:
-            s.get("https://www.bseindia.com/", timeout=10) # Handshake
-            r = s.get(url, headers=headers, timeout=10)
+            s.get("https://www.bseindia.com/", timeout=15)
+            r = s.get(url, headers=headers, timeout=15)
             r.raise_for_status()
             
             raw_data = r.json().get("Data", "[]")
             series = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
             
-            if not isinstance(series, list) or not series:
+            # ROBUST FIX: Ensure series is a list before creating DataFrame
+            if not isinstance(series, list):
+                return pd.DataFrame(columns=["date", "close", "volume"])
+            
+            if not series:  # Empty list
                 return pd.DataFrame(columns=["date", "close", "volume"])
             
             df = pd.DataFrame(series)
             if df.empty: return df
 
+            # Verify required columns exist
             required_cols = ["dttm", "vale1", "vole"]
             if not all(col in df.columns for col in required_cols):
                 return pd.DataFrame(columns=["date", "close", "volume"])
@@ -136,110 +153,114 @@ def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
             df["close"] = pd.to_numeric(df["vale1"], errors="coerce")
             df["volume"] = pd.to_numeric(df["vole"], errors="coerce")
             
-            return df[["date", "close", "volume"]].dropna().sort_values("date")
+            # Remove rows with any NaN values
+            result = df[["date", "close", "volume"]].dropna().sort_values("date")
+            return result
             
-    except Exception:
+    except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError, TypeError):
         return pd.DataFrame(columns=["date", "close", "volume"])
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
-def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date, user_cookie: str = "") -> pd.DataFrame:
-    """
-    Fetches NSE data. Uses user-provided cookie to bypass 403 Forbidden errors.
-    """
+def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     if start > end: return pd.DataFrame(columns=["date", "close", "volume"])
-
-    # Base Headers
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}",
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept": "*/*"
-    }
-
-    # INJECT USER COOKIE IF PROVIDED
-    if user_cookie.strip():
-        # Minimal cleaning if they pasted a full curl command header like "Cookie: xxxx"
-        clean_cookie = user_cookie
-        if "Cookie:" in clean_cookie:
-            clean_cookie = clean_cookie.split("Cookie:", 1)[1].strip()
-        headers["Cookie"] = clean_cookie
-
-    session = requests.Session()
-    session.headers.update(headers)
-
-    def fetch_chunk(d1, d2):
-        url = f"https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getHistoricalTradeData&symbol={symbol}&series={series}&fromDate={d1.strftime('%d-%m-%Y')}&toDate={d2.strftime('%d-%m-%Y')}&csv=true"
-        
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.nseindia.com/"}
+    series_json = json.dumps([series])
+    def fetch_range(d1, d2):
+        url = f"https://www.nseindia.com/api/historical/cm/equity?symbol={symbol}&series={series_json}&from={d1.strftime('%d-%m-%Y')}&to={d2.strftime('%d-%m-%Y')}"
         try:
-            r = session.get(url, timeout=10)
+            with requests.Session() as s:
+                s.get("https://www.nseindia.com", headers=headers, timeout=15)
+                r = s.get(url, headers=headers, timeout=15)
+                r.raise_for_status()
+                
+                data = r.json().get("data", [])
+                
+                # ROBUST FIX: Ensure data is a list before creating DataFrame
+                if not isinstance(data, list):
+                    return pd.DataFrame(columns=["date", "close", "volume"])
+                    
+                if not data:  # Empty list
+                    return pd.DataFrame(columns=["date", "close", "volume"])
+                
+                df = pd.DataFrame(data)
+                if df.empty: return df
+                
+                # Verify required columns exist
+                required_cols = ["CH_TIMESTAMP", "CH_CLOSING_PRICE", "CH_TOT_TRADED_QTY"]
+                if not all(col in df.columns for col in required_cols):
+                    return pd.DataFrame(columns=["date", "close", "volume"])
+                
+                df["date"] = pd.to_datetime(df["CH_TIMESTAMP"], errors="coerce").dt.date
+                df["close"] = pd.to_numeric(df["CH_CLOSING_PRICE"], errors="coerce")
+                df["volume"] = pd.to_numeric(df["CH_TOT_TRADED_QTY"], errors="coerce")
+                
+                # Remove rows with any NaN values
+                result = df[["date", "close", "volume"]].dropna()
+                return result
+                
+        except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError, TypeError):
+            return pd.DataFrame(columns=["date", "close", "volume"])
             
-            if r.status_code == 403:
-                # If 403, it means the cookie is missing or expired.
-                return pd.DataFrame()
-            
-            r.raise_for_status()
-            csv_text = r.text
-            if not csv_text or "Date" not in csv_text: return pd.DataFrame()
-
-            df = pd.read_csv(io.StringIO(csv_text))
-            df.columns = [c.strip().replace('"', '') for c in df.columns]
-            col_map = {c.lower(): c for c in df.columns}
-            
-            if 'date' not in col_map: return pd.DataFrame()
-
-            df["date"] = pd.to_datetime(df[col_map['date']], errors="coerce").dt.date
-            df["close"] = pd.to_numeric(df[col_map['close']].astype(str).str.replace(',', ''), errors="coerce")
-            df["volume"] = pd.to_numeric(df[col_map['volume']].astype(str).str.replace(',', ''), errors="coerce")
-            
-            return df[["date", "close", "volume"]].dropna()
-
-        except Exception:
-            return pd.DataFrame()
-
-    # Chunking logic (NSE allows max 365 days)
-    CHUNK_DAYS = 360
-    windows = []
-    current_end = end
-    while current_end >= start:
-        current_start = max(start, current_end - dt.timedelta(days=CHUNK_DAYS))
-        windows.append((current_start, current_end))
-        current_end = current_start - dt.timedelta(days=1)
+    windows, e = [], end
+    while e >= start:
+        s = max(start, e - dt.timedelta(days=364))
+        windows.append((s, e)); e = s - dt.timedelta(days=1)
+    parts = [fetch_range(d1, d2) for d1, d2 in windows if d1 <= d2]
+    if not parts: return pd.DataFrame(columns=["date", "close", "volume"])
     
-    parts = []
-    for s_date, e_date in windows:
-        p = fetch_chunk(s_date, e_date)
-        if not p.empty: parts.append(p)
+    # Filter out empty DataFrames before concatenating
+    valid_parts = [part for part in parts if not part.empty]
+    if not valid_parts: return pd.DataFrame(columns=["date", "close", "volume"])
     
-    if not parts: 
-        return pd.DataFrame(columns=["date", "close", "volume"])
-    
-    return pd.concat(parts, ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+    return pd.concat(valid_parts, ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
 
+# ---------------- Supabase-backed cache -----------------
+def _get_data_with_db_cache(
+    entity_name: str, key: str, exchange: str,
+    start: dt.date, end: dt.date,
+    fetch_function: Callable, fetch_args: dict,
+    use_cache: bool, coverage: str, tail_only: bool
+) -> pd.DataFrame:
+    if not use_cache:
+        return fetch_function(start=start, end=end, **fetch_args)
+    
+    todo = _tail_windows(start, end, sb_max_date_for_key(key), monthly=(coverage == "monthly")) if tail_only else list(month_ranges_to_fetch(start, end, sb_dates_in_range(key, start, end)))
+    fresh_parts = [df for d1, d2 in todo if not (df := fetch_function(start=d1, end=d2, **fetch_args)).empty]
+
+    if fresh_parts:
+        all_new = pd.concat(fresh_parts, ignore_index=True)
+        rows = all_new.rename(columns={"date": "dt"})[["dt", "close", "volume"]].copy()
+        rows["exchange"] = exchange
+        rows["entity"] = entity_name
+        rows["k"] = key
+        sb_upsert_trades(rows)
+
+    return sb_load_range(key, start, end).rename(columns={"dt": "date"})
+
+def get_nse_data_db_cached(entity_name, symbol, series, start, end, **kwargs) -> pd.DataFrame:
+    if not symbol or not series: return pd.DataFrame(columns=["date", "close", "volume"])
+    return _get_data_with_db_cache(entity_name=entity_name, key=f"NSE:{symbol}:{series}".upper(), exchange="NSE", start=start, end=end, fetch_function=get_nse_data, fetch_args={"symbol": symbol, "series": series}, **kwargs)
+
+def get_bse_data_db_cached(entity_name, scrip, start, end, **kwargs) -> pd.DataFrame:
+    if not scrip: return pd.DataFrame(columns=["date", "close", "volume"])
+    return _get_data_with_db_cache(entity_name=entity_name, key=f"BSE:{scrip}", exchange="BSE", start=start, end=end, fetch_function=get_bse_data, fetch_args={"scripcode": scrip}, **kwargs)
 
 # -------------------------- one-entity fetch --------------------------
 def fetch_single_entity(
-    row: pd.Series, start: dt.date, end: dt.date, monthly_mode: bool, nse_cookie: str
+    row: pd.Series, start: dt.date, end: dt.date, monthly_mode: bool, use_cache_now: bool,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    
+    cov = "monthly" if monthly_mode else "daily"
     sym, series, scrip = row.get("NSE Symbol", ""), row.get("NSE Series", ""), row.get("BSE Scrip Code", "")
     
-    if sym and series:
-        # Pass the cookie specifically to NSE fetcher
-        nse_df = get_nse_data(sym, series, start, end, user_cookie=nse_cookie)
-    else:
-        nse_df = pd.DataFrame(columns=["date", "close", "volume"])
-        
-    if scrip:
-        bse_df = get_bse_data(scrip, start, end)
-    else:
-        bse_df = pd.DataFrame(columns=["date", "close", "volume"])
+    nse_df = get_nse_data_db_cached(row["Name of Entity"], sym, series, start, end, use_cache=use_cache_now, coverage=cov, tail_only=True)
+    bse_df = get_bse_data_db_cached(row["Name of Entity"], scrip, start, end, use_cache=use_cache_now, coverage=cov, tail_only=True)
 
     if monthly_mode:
-        if not nse_df.empty: nse_df = to_monthly(nse_df)
-        if not bse_df.empty: bse_df = to_monthly(bse_df)
+        if nse_df is not None and not nse_df.empty: nse_df = to_monthly(nse_df)
+        if bse_df is not None and not bse_df.empty: bse_df = to_monthly(bse_df)
     
     for df in (nse_df, bse_df):
-        if not df.empty:
+        if df is not None and not df.empty:
             df["Entity"], df["Type"] = row["Name of Entity"], row["Type of Entity"]
             
     return nse_df, bse_df
@@ -247,36 +268,32 @@ def fetch_single_entity(
 # -------------------------- UI Components --------------------------
 def render_sidebar(entities_df: pd.DataFrame):
     st.markdown("### Trading — Controls")
-    
-    # --- New Settings Box for Manual Cookie ---
-    with st.expander("⚙️ Connection Settings (NSE)", expanded=False):
-        st.caption("If NSE data fails (403), paste the 'Cookie' header from your browser network tab here.")
-        nse_cookie = st.text_area("NSE Cookie String", height=100, help="Paste the value of the 'cookie' header from a valid request to nseindia.com")
-
     start, end = clamp_dates(
         st.date_input("From", value=dt.date(2024, 4, 1), format="DD/MM/YYYY", key="trade_from"),
         st.date_input("To", value=dt.date.today(), format="DD/MM/YYYY", key="trade_to")
     )
     mode = st.radio("Mode", ["Single Entity", "All REITs", "All InvITs"], key="trade_mode", horizontal=True)
     monthly_mode = st.checkbox("Monthly aggregation", value=(mode != "Single Entity"), help="volume=sum, close=last day of month", key="trade_monthly", disabled=(mode != "Single Entity"))
+    use_db_cache = st.checkbox("Use cloud cache (Supabase)", value=True, key="trade_use_db")
+    
+    sb_ok = sb_healthcheck() if use_db_cache else False
+    if use_db_cache: st.caption("Supabase: " + ("✅ connected" if sb_ok else "⌐ not reachable"))
     
     entity_name = None
     if mode == "Single Entity":
         if not entities_df.empty:
             entity_name = st.selectbox("Select Entity", entities_df["Name of Entity"].tolist(), index=0)
     
-    return mode, start, end, (monthly_mode or mode != "Single Entity"), entity_name, nse_cookie
+    return mode, start, end, (monthly_mode or mode != "Single Entity"), use_db_cache and sb_ok, entity_name
 
-def render_single_entity_view(row, start_date, end_date, monthly_mode, nse_cookie):
+def render_single_entity_view(row, start_date, end_date, monthly_mode, use_cache_now):
     st.subheader(f"Entity View: {row['Name of Entity']}")
-    nse_df, bse_df = fetch_single_entity(row, start_date, end_date, monthly_mode, nse_cookie)
+    nse_df, bse_df = fetch_single_entity(row, start_date, end_date, monthly_mode, use_cache_now)
     
     c1, c2 = st.columns(2, gap="large")
     with c1:
         title = f"NSE • {row.get('NSE Symbol', '')}" + (" (Monthly)" if monthly_mode else "")
-        if nse_df is None or nse_df.empty: 
-            st.warning("NSE: No data for this period.")
-            if not nse_cookie: st.info("ℹ️ Try pasting a valid Cookie in 'Connection Settings' in the sidebar.")
+        if nse_df is None or nse_df.empty: st.warning("NSE: No data for this period.")
         else:
             st.plotly_chart(line_bar_figure(nse_df, title, monthly=monthly_mode), use_container_width=True)
             st.dataframe(nse_df, use_container_width=True, hide_index=True)
@@ -294,8 +311,7 @@ def render():
     entities_all = load_entities(ENTITIES_SHEET_CSV)
     
     with st.sidebar:
-        # Now returns nse_cookie as well
-        mode, start_date, end_date, monthly_mode, entity_name, nse_cookie = render_sidebar(entities_all)
+        mode, start_date, end_date, monthly_mode, use_cache_now, entity_name = render_sidebar(entities_all)
 
     if entities_all.empty:
         st.error("Could not load entities list. Please check the CSV URL in the sidebar."); return
@@ -304,7 +320,7 @@ def render():
         if not entity_name:
             st.info("Select an entity from the sidebar to begin."); return
         selected_row = entities_all[entities_all["Name of Entity"] == entity_name].iloc[0]
-        render_single_entity_view(selected_row, start_date, end_date, monthly_mode, nse_cookie)
+        render_single_entity_view(selected_row, start_date, end_date, monthly_mode, use_cache_now)
     
     else: # Group View
         group_type = "REIT" if mode == "All REITs" else "InvIT"
@@ -317,19 +333,13 @@ def render():
         daily_nse_parts, daily_bse_parts = [], []
         with st.status(f"Fetching daily data for {len(rows_to_fetch)} {group_type}s...", expanded=True) as status:
             with ThreadPoolExecutor(max_workers=8) as executor:
-                future_map = {}
-                for _, r in rows_to_fetch.iterrows():
-                    # Pass the cookie here as well
-                    f = executor.submit(fetch_single_entity, r, start_date, end_date, False, nse_cookie)
-                    add_script_run_ctx(f)
-                    future_map[f] = r
-
+                future_map = {executor.submit(fetch_single_entity, r, start_date, end_date, False, use_cache_now): r for _, r in rows_to_fetch.iterrows()}
                 for future in as_completed(future_map):
                     entity_name = future_map[future]['Name of Entity']
                     try:
                         nse_df, bse_df = future.result()
-                        if not nse_df.empty: daily_nse_parts.append(nse_df)
-                        if not bse_df.empty: daily_bse_parts.append(bse_df)
+                        if nse_df is not None and not nse_df.empty: daily_nse_parts.append(nse_df)
+                        if bse_df is not None and not bse_df.empty: daily_bse_parts.append(bse_df)
                         status.write(f"✅ Completed: {entity_name}")
                     except Exception as e:
                         status.write(f"⌐ Failed: {entity_name} ({e})")
