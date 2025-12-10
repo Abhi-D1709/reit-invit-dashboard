@@ -1,9 +1,15 @@
 # tabs/trading.py
-# Trading (NSE & BSE) — API-only (no DB), with robust NSE NextApi fetch & 1Y windowing
+# Trading (NSE & BSE) — API-only (no DB)
+# - NSE: NextApi with hardened session + automatic fallback to official bhavcopy archives on 403
+# - BSE: StockReachGraph endpoint (unchanged)
+# - Single Entity + Group View (REITs / InvITs)
+# - Daily data everywhere; Group charts/CSVs show monthly aggregates
+# - Exposes render() for pages/4_Trading.py to import
 
 import io
-import json
 import re
+import json
+import zipfile
 import time
 import random
 import datetime as dt
@@ -18,12 +24,12 @@ import streamlit as st
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-# Your common utils should expose the Entities master CSV export URL
-# e.g., ENTITIES_SHEET_CSV = "https://docs.google.com/spreadsheets/d/<id>/export?format=csv"
+# Expect ENTITIES_SHEET_CSV in your utils.common
+# e.g., ENTITIES_SHEET_CSV = "https://docs.google.com/spreadsheets/d/<sheet-id>/export?format=csv"
 from utils.common import ENTITIES_SHEET_CSV
 
 
-# ============================== Helpers ==============================
+# ============================== Small helpers ==============================
 def _clean_str(x):
     return str(x).strip() if pd.notna(x) else ""
 
@@ -70,6 +76,78 @@ def load_entities(url: str) -> pd.DataFrame:
     if "BSE Scrip Code" in df.columns:
         df["BSE Scrip Code"] = df["BSE Scrip Code"].map(_normalize_bse_code)
     return df
+
+
+def clamp_dates(start: dt.date, end: dt.date) -> Tuple[dt.date, dt.date]:
+    today = dt.date.today()
+    if end > today:
+        end = today
+    if start > end:
+        start = end
+    return start, end
+
+
+# ============================== Charting helpers ==============================
+def _apply_xaxis(fig: go.Figure, *, hide_weekends: bool, monthly: bool):
+    if hide_weekends:
+        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    if monthly:
+        # show every month; diagonal labels
+        fig.update_xaxes(
+            tickformat="%b %Y",
+            dtick="M1",
+            ticklabelmode="period",
+            tickangle=45,
+        )
+
+
+def _base_fig_layout(fig: go.Figure, title: str, height: int = 520, *, hide_weekends=True, monthly=False):
+    fig.update_layout(
+        title=title,
+        height=height,
+        barmode="overlay",
+        bargap=0.25 if monthly else 0.10,
+        hovermode="x unified",
+        margin=dict(l=40, r=20, t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        template="simple_white",
+    )
+    _apply_xaxis(fig, hide_weekends=hide_weekends, monthly=monthly)
+    fig.update_yaxes(title_text="Volume", secondary_y=False)
+    fig.update_yaxes(title_text="Close", secondary_y=True)
+
+
+def line_bar_figure(df: pd.DataFrame, title: str, height: int = 520, *, monthly=False) -> Optional[go.Figure]:
+    if df.empty:
+        return None
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_bar(x=df["date"], y=df["volume"], name="Volume", opacity=0.5, marker_line_width=0)
+    fig.add_trace(
+        go.Scatter(x=df["date"], y=df["close"], name="Close", mode="lines", line=dict(width=2)),
+        secondary_y=True,
+    )
+    # When monthly=True, DO NOT hide weekends (month-ends can be Sat/Sun)
+    _base_fig_layout(fig, title, height, hide_weekends=not monthly, monthly=monthly)
+    return fig
+
+
+def volume_only_bar(df: pd.DataFrame, title: str, height: int = 420, *, monthly=False) -> Optional[go.Figure]:
+    if df.empty:
+        return None
+    fig = go.Figure()
+    fig.add_bar(x=df["date"], y=df["volume"], name="Volume", opacity=0.75, marker_line_width=0)
+    _apply_xaxis(fig, hide_weekends=not monthly, monthly=monthly)
+    fig.update_yaxes(title_text="Volume")
+    fig.update_layout(
+        title=title,
+        height=height,
+        hovermode="x unified",
+        margin=dict(l=40, r=20, t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        template="simple_white",
+        bargap=0.25 if monthly else 0.10,
+    )
+    return fig
 
 
 def to_monthly(df: pd.DataFrame) -> pd.DataFrame:
@@ -139,76 +217,6 @@ def aggregate_volume_and_turnover(df: pd.DataFrame, monthly: bool) -> pd.DataFra
     return out
 
 
-def _apply_xaxis(fig: go.Figure, *, hide_weekends: bool, monthly: bool):
-    if hide_weekends:
-        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
-    if monthly:
-        fig.update_xaxes(
-            tickformat="%b %Y",
-            dtick="M1",
-            ticklabelmode="period",
-            tickangle=45,  # diagonal month labels
-        )
-
-
-def _base_fig_layout(fig: go.Figure, title: str, height: int = 520, *, hide_weekends=True, monthly=False):
-    fig.update_layout(
-        title=title,
-        height=height,
-        barmode="overlay",
-        bargap=0.25 if monthly else 0.10,
-        hovermode="x unified",
-        margin=dict(l=40, r=20, t=60, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        template="simple_white",
-    )
-    _apply_xaxis(fig, hide_weekends=hide_weekends, monthly=monthly)
-    fig.update_yaxes(title_text="Volume", secondary_y=False)
-    fig.update_yaxes(title_text="Close", secondary_y=True)
-
-
-def line_bar_figure(df: pd.DataFrame, title: str, height: int = 520, *, monthly=False) -> Optional[go.Figure]:
-    if df.empty:
-        return None
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_bar(x=df["date"], y=df["volume"], name="Volume", opacity=0.5, marker_line_width=0)
-    fig.add_trace(
-        go.Scatter(x=df["date"], y=df["close"], name="Close", mode="lines", line=dict(width=2)),
-        secondary_y=True,
-    )
-    # When monthly=True, DO NOT hide weekends (month-ends can be Sat/Sun)
-    _base_fig_layout(fig, title, height, hide_weekends=not monthly, monthly=monthly)
-    return fig
-
-
-def volume_only_bar(df: pd.DataFrame, title: str, height: int = 420, *, monthly=False) -> Optional[go.Figure]:
-    if df.empty:
-        return None
-    fig = go.Figure()
-    fig.add_bar(x=df["date"], y=df["volume"], name="Volume", opacity=0.75, marker_line_width=0)
-    _apply_xaxis(fig, hide_weekends=not monthly, monthly=monthly)
-    fig.update_yaxes(title_text="Volume")
-    fig.update_layout(
-        title=title,
-        height=height,
-        hovermode="x unified",
-        margin=dict(l=40, r=20, t=60, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        template="simple_white",
-        bargap=0.25 if monthly else 0.10,
-    )
-    return fig
-
-
-def clamp_dates(start: dt.date, end: dt.date) -> Tuple[dt.date, dt.date]:
-    today = dt.date.today()
-    if end > today:
-        end = today
-    if start > end:
-        start = end
-    return start, end
-
-
 # ============================== BSE fetch (unchanged URL) ==============================
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
@@ -251,7 +259,7 @@ def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
         return pd.DataFrame(columns=["date", "close", "volume"])
 
 
-# ============================== NSE NextApi (with anti-403 hardening) ==============================
+# ============================== NSE: session + NextApi + archives fallback ==============================
 @st.cache_resource(show_spinner=False)
 def get_nse_session() -> requests.Session:
     """
@@ -283,87 +291,131 @@ def get_nse_session() -> requests.Session:
     return s
 
 
-def _parse_nse_df_from_jsonlike(data) -> pd.DataFrame:
+def _nse_archive_urls_for_date(d: dt.date) -> List[str]:
     """
-    Normalize JSON-shaped payload into date, close, volume.
-    Accepts dicts with 'data' list or a raw list.
+    Returns two official NSE archive URLs for the given date.
+    Try the newer 'products/content' CSV first (often unzipped),
+    then the older 'content/historical/EQUITIES' zipped bhavcopy.
     """
-    if isinstance(data, dict):
-        if "data" in data and isinstance(data["data"], list):
-            df = pd.DataFrame(data["data"])
-        else:
-            lst = next((v for v in data.values() if isinstance(v, list)), None)
-            df = pd.DataFrame(lst) if lst is not None else pd.DataFrame()
-    elif isinstance(data, list):
-        df = pd.DataFrame(data)
-    else:
-        df = pd.DataFrame()
+    ddmmyyyy = d.strftime("%d%m%Y")              # e.g. 10122024
+    dd = d.strftime("%d")                        # e.g. 10
+    mmm = d.strftime("%b").upper()               # e.g. DEC
+    yyyy = d.strftime("%Y")                      # e.g. 2024
 
-    if df.empty:
+    # Newer daily CSV
+    u1 = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv"
+
+    # Legacy zipped EQ bhavcopy
+    u2 = f"https://www.nseindia.com/content/historical/EQUITIES/{yyyy}/{mmm}/cm{dd}{mmm}{yyyy}bhav.csv.zip"
+    return [u1, u2]
+
+
+def _parse_bhavcopy_df(df: pd.DataFrame, symbol: str, series: str) -> pd.DataFrame:
+    """
+    Normalizes a bhavcopy row to [date, close, volume].
+    Bhavcopy columns are typically: SYMBOL, SERIES, CLOSE, TOTTRDQTY, TIMESTAMP
+    """
+    cols = {c.upper().strip(): c for c in df.columns}
+    need = ["SYMBOL", "SERIES", "CLOSE", "TOTTRDQTY", "TIMESTAMP"]
+    if not all(n in cols for n in need):
         return pd.DataFrame(columns=["date", "close", "volume"])
 
-    # Detect columns
-    date_cols = [c for c in df.columns if c.upper() in ("CH_TIMESTAMP", "TIMESTAMP", "DATE")]
-    close_cols = [c for c in df.columns if c.upper() in ("CH_CLOSING_PRICE", "CLOSE", "CLOSE_PRICE", "CLOSEPRICE")]
-    vol_cols = [c for c in df.columns if c.upper() in ("CH_TOT_TRADED_QTY", "VOLUME", "TOTALTRADEDQTY", "TOTAL_TRADED_QUANTITY")]
+    sub = df[(df[cols["SYMBOL"]].astype(str).str.upper() == symbol.upper()) &
+             (df[cols["SERIES"]].astype(str).str.upper() == series.upper())]
 
-    if not date_cols:
-        return pd.DataFrame(columns=["date", "close", "volume"])
-    dcol = date_cols[0]
-    ccol = (close_cols[0] if close_cols else next((c for c in df.columns if "close" in c.lower()), None))
-    vcol = (vol_cols[0] if vol_cols else next((c for c in df.columns if ("qty" in c.lower() or "volume" in c.lower())), None))
-    if not (ccol and vcol):
+    if sub.empty:
         return pd.DataFrame(columns=["date", "close", "volume"])
 
     out = pd.DataFrame()
-    out["date"] = pd.to_datetime(df[dcol], errors="coerce").dt.date
-    out["close"] = pd.to_numeric(df[ccol], errors="coerce")
-    out["volume"] = pd.to_numeric(df[vcol], errors="coerce")
-    return out.dropna()
+    out["date"] = pd.to_datetime(sub[cols["TIMESTAMP"]], errors="coerce").dt.date
+    out["close"] = pd.to_numeric(sub[cols["CLOSE"]], errors="coerce")
+    out["volume"] = pd.to_numeric(sub[cols["TOTTRDQTY"]], errors="coerce")
+    return out.dropna(subset=["date", "close", "volume"])[["date", "close", "volume"]]
 
 
-def _parse_nse_df_from_csv(text: str) -> pd.DataFrame:
-    """Parse CSV text returned by NextApi (csv=true)."""
-    if not text or not text.strip():
+def _fetch_archive_day(sess: requests.Session, symbol: str, series: str, d: dt.date) -> pd.DataFrame:
+    """
+    Try to fetch NSE bhavcopy for a single day from official archives.
+    Tries 'products/content' CSV first; if 404/blocked, fallbacks to zipped historical path.
+    Returns either a single-row df [date, close, volume] or empty.
+    """
+    headers = {
+        "User-Agent": sess.headers.get("User-Agent", "Mozilla/5.0"),
+        "Accept": "text/csv, application/zip, application/octet-stream, */*",
+        "Referer": "https://www.nseindia.com/reports",
+        "Origin": "https://www.nseindia.com",
+        "Connection": "keep-alive",
+    }
+    for url in _nse_archive_urls_for_date(d):
+        try:
+            r = sess.get(url, headers=headers, timeout=25)
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+
+            ctype = (r.headers.get("content-type") or "").lower()
+            # Plain CSV (products/content)
+            if "text/csv" in ctype or url.endswith(".csv"):
+                df = pd.read_csv(io.StringIO(r.text))
+                return _parse_bhavcopy_df(df, symbol, series)
+
+            # Zip (historical EQUITIES path)
+            if "zip" in ctype or url.endswith(".zip"):
+                with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+                    name = next((n for n in zf.namelist() if n.lower().endswith(".csv")), None)
+                    if not name:
+                        continue
+                    with zf.open(name) as f:
+                        df = pd.read_csv(f)
+                        return _parse_bhavcopy_df(df, symbol, series)
+        except Exception:
+            continue
+
+    return pd.DataFrame(columns=["date", "close", "volume"])
+
+
+def _fetch_archives_range(symbol: str, series: str, start: dt.date, end: dt.date, max_workers: int = 4) -> pd.DataFrame:
+    """
+    Download official bhavcopies day-by-day and extract [date, close, volume] for the symbol/series.
+    Uses limited parallelism for speed without hammering.
+    """
+    if start > end:
         return pd.DataFrame(columns=["date", "close", "volume"])
+
+    sess = get_nse_session()  # reuse NSE session for consistent headers/cookies
+    # Gentle warm-up
     try:
-        csv_df = pd.read_csv(io.StringIO(text))
+        sess.get("https://www.nseindia.com/market-data", timeout=20)
     except Exception:
+        pass
+
+    all_days = pd.date_range(start, end, freq="D").date
+    parts: List[pd.DataFrame] = []
+
+    def _task(d: dt.date) -> pd.DataFrame:
+        return _fetch_archive_day(sess, symbol, series, d)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(_task, d): d for d in all_days}
+        for fut in as_completed(futs):
+            df_day = fut.result()
+            if not df_day.empty:
+                parts.append(df_day)
+
+    if not parts:
         return pd.DataFrame(columns=["date", "close", "volume"])
 
-    cols = {c.lower().strip(): c for c in csv_df.columns}
-    date_c = next((cols[k] for k in ("ch_timestamp", "timestamp", "date", "trade_date", "tradedate") if k in cols), None)
-    close_c = next((cols[k] for k in ("ch_closing_price", "close", "close_price", "closeprice") if k in cols), None)
-    vol_c = next((cols[k] for k in ("ch_tot_traded_qty", "total_traded_quantity", "volume", "tottrdqty", "totaltradedqty") if k in cols), None)
-
-    # fuzzy fallback
-    if not date_c:
-        date_c = next((c for c in csv_df.columns if "date" in c.lower() or "timestamp" in c.lower()), None)
-    if not close_c:
-        close_c = next((c for c in csv_df.columns if "close" in c.lower()), None)
-    if not vol_c:
-        vol_c = next((c for c in csv_df.columns if "qty" in c.lower() or "volume" in c.lower()), None)
-
-    if not (date_c and close_c and vol_c):
-        return pd.DataFrame(columns=["date", "close", "volume"])
-
-    out = pd.DataFrame()
-    out["date"] = pd.to_datetime(csv_df[date_c], errors="coerce").dt.date
-    out["close"] = pd.to_numeric(csv_df[close_c], errors="coerce")
-    out["volume"] = pd.to_numeric(csv_df[vol_c], errors="coerce")
-    return out.dropna()
+    out = pd.concat(parts, ignore_index=True)
+    out = out.drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+    return out
 
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     """
-    NSE via NextApi:
-      https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getHistoricalTradeData
-        &symbol=EMBASSY&series=RR&fromDate=10-12-2024&toDate=10-12-2025&csv=true
-
-    Rules:
-      * If range > 1 year, fetch in ≤1-year windows (walk backwards from end), reusing a warmed session.
-      * On 403 with csv=true, retry that window with csv=false (JSON).
+    Primary: NSE NextApi windows (≤1 year, walked backwards), hardened headers/session.
+    Fallback per window: official NSE bhavcopy archives (daily).
+    Returns daily dataframe with columns [date, close, volume].
     """
     if not symbol or not series or start > end:
         return pd.DataFrame(columns=["date", "close", "volume"])
@@ -380,14 +432,77 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
 
     sess = get_nse_session()
     quote_url = f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}"
-
-    # Per-symbol warm-up
     try:
         sess.get(quote_url, timeout=20)
     except Exception:
         pass
 
+    def _parse_csv_text(text: str) -> pd.DataFrame:
+        if not text or not text.strip():
+            return pd.DataFrame(columns=["date", "close", "volume"])
+        try:
+            csv_df = pd.read_csv(io.StringIO(text))
+        except Exception:
+            return pd.DataFrame(columns=["date", "close", "volume"])
+
+        cols = {c.lower().strip(): c for c in csv_df.columns}
+        date_c = next((cols[k] for k in ("ch_timestamp","timestamp","date","trade_date","tradedate") if k in cols), None)
+        close_c = next((cols[k] for k in ("ch_closing_price","close","close_price","closeprice") if k in cols), None)
+        vol_c = next((cols[k] for k in ("ch_tot_traded_qty","total_traded_quantity","volume","tottrdqty","totaltradedqty") if k in cols), None)
+
+        if not date_c:
+            date_c = next((c for c in csv_df.columns if "date" in c.lower() or "timestamp" in c.lower()), None)
+        if not close_c:
+            close_c = next((c for c in csv_df.columns if "close" in c.lower()), None)
+        if not vol_c:
+            vol_c = next((c for c in csv_df.columns if "qty" in c.lower() or "volume" in c.lower()), None)
+
+        if not (date_c and close_c and vol_c):
+            return pd.DataFrame(columns=["date", "close", "volume"])
+
+        out = pd.DataFrame()
+        out["date"] = pd.to_datetime(csv_df[date_c], errors="coerce").dt.date
+        out["close"] = pd.to_numeric(csv_df[close_c], errors="coerce")
+        out["volume"] = pd.to_numeric(csv_df[vol_c], errors="coerce")
+        return out.dropna(subset=["date", "close", "volume"])
+
+    def _parse_json_like(j: dict) -> pd.DataFrame:
+        if isinstance(j, dict):
+            if "data" in j and isinstance(j["data"], list):
+                df = pd.DataFrame(j["data"])
+            else:
+                lst = next((v for v in j.values() if isinstance(v, list)), None)
+                df = pd.DataFrame(lst) if lst is not None else pd.DataFrame()
+        elif isinstance(j, list):
+            df = pd.DataFrame(j)
+        else:
+            df = pd.DataFrame()
+
+        if df.empty:
+            return pd.DataFrame(columns=["date", "close", "volume"])
+
+        date_cols = [c for c in df.columns if c.upper() in ("CH_TIMESTAMP","TIMESTAMP","DATE")]
+        close_cols = [c for c in df.columns if c.upper() in ("CH_CLOSING_PRICE","CLOSE","CLOSE_PRICE","CLOSEPRICE")]
+        vol_cols = [c for c in df.columns if c.upper() in ("CH_TOT_TRADED_QTY","VOLUME","TOTALTRADEDQTY","TOTAL_TRADED_QUANTITY")]
+
+        if not date_cols:
+            return pd.DataFrame(columns=["date", "close", "volume"])
+        dcol = date_cols[0]
+        ccol = (close_cols[0] if close_cols else next((c for c in df.columns if "close" in c.lower()), None))
+        vcol = (vol_cols[0] if vol_cols else next((c for c in df.columns if ("qty" in c.lower() or "volume" in c.lower())), None))
+        if not (ccol and vcol):
+            return pd.DataFrame(columns=["date", "close", "volume"])
+
+        out = pd.DataFrame()
+        out["date"] = pd.to_datetime(df[dcol], errors="coerce").dt.date
+        out["close"] = pd.to_numeric(df[ccol], errors="coerce")
+        out["volume"] = pd.to_numeric(df[vcol], errors="coerce")
+        return out.dropna(subset=["date", "close", "volume"])
+
     def fetch_window(d1: dt.date, d2: dt.date) -> pd.DataFrame:
+        """
+        Try NextApi first (csv=true then csv=false). If 403/failed, fall back to archives for this window.
+        """
         last_err = None
         for _ in range(3):
             params_csv = {
@@ -403,74 +518,78 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
                 r.raise_for_status()
                 ctype = (r.headers.get("content-type") or "").lower()
 
-                # JSON-ish path (csv=true might still return JSON)
                 if "application/json" in ctype or r.text.lstrip("\ufeff").strip().startswith("{"):
                     try:
                         j = r.json()
                     except json.JSONDecodeError:
                         j = json.loads(r.text.lstrip("\ufeff").strip())
-                    dfj = _parse_nse_df_from_jsonlike(j)
+                    dfj = _parse_json_like(j)
                     if not dfj.empty:
                         return dfj
 
-                # CSV/text path
-                dfc = _parse_nse_df_from_csv(r.text)
+                dfc = _parse_csv_text(r.text)
                 if not dfc.empty:
                     return dfc
 
-                # If neither parsed, raise to trigger fallback/retry
                 raise ValueError("Unexpected NSE response format")
 
             except HTTPError as e:
                 last_err = e
                 if getattr(e.response, "status_code", None) == 403:
-                    # Refresh cookies + retry with csv=false once
+                    # Refresh + csv=false
                     try:
                         sess.get("https://www.nseindia.com", timeout=20)
                         sess.get(quote_url, timeout=20)
                     except Exception:
                         pass
                     try:
-                        params_json = {
-                            "functionName": "getHistoricalTradeData",
-                            "symbol": symbol,
-                            "series": series,
-                            "fromDate": d1.strftime("%d-%m-%Y"),
-                            "toDate": d2.strftime("%d-%m-%Y"),
-                            "csv": "false",
-                        }
-                        r2 = sess.get(base, params=params_json, timeout=25, headers={"Referer": quote_url})
+                        r2 = sess.get(
+                            base,
+                            params={
+                                "functionName": "getHistoricalTradeData",
+                                "symbol": symbol,
+                                "series": series,
+                                "fromDate": d1.strftime("%d-%m-%Y"),
+                                "toDate": d2.strftime("%d-%m-%Y"),
+                                "csv": "false",
+                            },
+                            timeout=25,
+                            headers={"Referer": quote_url},
+                        )
                         r2.raise_for_status()
-                        j = r2.json()
-                        dfj = _parse_nse_df_from_jsonlike(j)
+                        dfj = _parse_json_like(r2.json())
                         if not dfj.empty:
                             return dfj
                     except Exception as e2:
                         last_err = e2
+
+                # brief jitter before retrying NextApi
                 time.sleep(0.6 + random.random() * 0.8)
+
             except Exception as e:
                 last_err = e
                 time.sleep(0.6 + random.random() * 0.8)
 
-        st.warning(f"NSE {symbol} {d1:%d-%b-%Y}→{d2:%d-%b-%Y}: {type(last_err).__name__}: {last_err}")
-        return pd.DataFrame(columns=["date", "close", "volume"])
+        # If NextApi keeps failing for this window, fall back to official archives for this range.
+        st.info(f"Falling back to NSE archives for {symbol} {d1:%d-%b-%Y}→{d2:%d-%b-%Y} ({type(last_err).__name__})")
+        return _fetch_archives_range(symbol, series, d1, d2)
 
     parts = []
     for d1, d2 in windows:
-        parts.append(fetch_window(d1, d2))
-        # small pacing between windows to avoid rate-limit bursts
-        time.sleep(0.4 + random.random() * 0.6)
+        dfw = fetch_window(d1, d2)
+        if not dfw.empty:
+            parts.append(dfw)
+        time.sleep(0.3 + random.random() * 0.5)  # gentle pacing between windows
 
-    parts = [p for p in parts if not p.empty]
     if not parts:
         return pd.DataFrame(columns=["date", "close", "volume"])
 
     out = (
         pd.concat(parts, ignore_index=True)
-        .dropna(subset=["date"])
-        .drop_duplicates(subset=["date"])
-        .sort_values("date")
-        .reset_index(drop=True)
+          .dropna(subset=["date"])
+          .drop_duplicates(subset=["date"])
+          .sort_values("date")
+          .reset_index(drop=True)
     )
     out["close"] = pd.to_numeric(out["close"], errors="coerce")
     out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
@@ -516,27 +635,32 @@ def fetch_single_entity(
     return nse_df, bse_df
 
 
-# ============================== UI Components ==============================
+# ============================== UI components ==============================
 def render_sidebar(entities_df: pd.DataFrame):
     st.markdown("### Trading — Controls")
-    start, end = clamp_dates(
-        st.date_input("From", value=dt.date(2024, 4, 1), format="DD/MM/YYYY", key="trade_from"),
-        st.date_input("To", value=dt.date.today(), format="DD/MM/YYYY", key="trade_to"),
-    )
+    start_input = st.date_input("From", value=dt.date(2024, 4, 1), format="DD/MM/YYYY", key="trade_from")
+    end_input = st.date_input("To", value=dt.date.today(), format="DD/MM/YYYY", key="trade_to")
+    start, end = clamp_dates(start_input, end_input)
+
     mode = st.radio("Mode", ["Single Entity", "All REITs", "All InvITs"], key="trade_mode", horizontal=True)
-    monthly_mode = st.checkbox(
-        "Monthly aggregation",
-        value=(mode != "Single Entity"),
-        help="volume=sum, close=last day of month",
-        key="trade_monthly",
-        disabled=(mode != "Single Entity"),
-    )
+
+    # For group view we always aggregate monthly (requested earlier to decongest)
+    if mode == "Single Entity":
+        monthly_mode = st.checkbox(
+            "Monthly aggregation",
+            value=False,
+            help="volume=sum, close=last trading day of month",
+            key="trade_monthly",
+        )
+    else:
+        monthly_mode = True
+        st.caption("Group View uses monthly aggregation for charts and aggregate CSVs.")
 
     entity_name = None
     if mode == "Single Entity" and not entities_df.empty:
         # Keep displayed order as in sheet
         entity_name = st.selectbox("Select Entity", entities_df["Name of Entity"].tolist(), index=0)
-    return mode, start, end, (monthly_mode or mode != "Single Entity"), entity_name
+    return mode, start, end, monthly_mode, entity_name
 
 
 def render_single_entity_view(row, start_date, end_date, monthly_mode):
@@ -549,8 +673,11 @@ def render_single_entity_view(row, start_date, end_date, monthly_mode):
         if nse_df.empty:
             st.warning("NSE: No data for this period.")
         else:
-            st.plotly_chart(line_bar_figure(nse_df, title, monthly=monthly_mode), width="stretch",
-                            config={"displayModeBar": True, "scrollZoom": True})
+            st.plotly_chart(
+                line_bar_figure(nse_df, title, monthly=monthly_mode),
+                width="stretch",
+                config={"displayModeBar": True, "scrollZoom": True},
+            )
             st.dataframe(nse_df, width="stretch", hide_index=True)
             st.download_button(
                 "Download NSE CSV" + (" (Monthly)" if monthly_mode else ""),
@@ -563,8 +690,11 @@ def render_single_entity_view(row, start_date, end_date, monthly_mode):
         if bse_df.empty:
             st.warning("BSE: No data for this period.")
         else:
-            st.plotly_chart(line_bar_figure(bse_df, title, monthly=monthly_mode), width="stretch",
-                            config={"displayModeBar": True, "scrollZoom": True})
+            st.plotly_chart(
+                line_bar_figure(bse_df, title, monthly=monthly_mode),
+                width="stretch",
+                config={"displayModeBar": True, "scrollZoom": True},
+            )
             st.dataframe(bse_df, width="stretch", hide_index=True)
             st.download_button(
                 "Download BSE CSV" + (" (Monthly)" if monthly_mode else ""),
@@ -574,7 +704,7 @@ def render_single_entity_view(row, start_date, end_date, monthly_mode):
             )
 
 
-# ============================== Main Render ==============================
+# ============================== Main render() ==============================
 def render():
     st.header("Trading (NSE & BSE)")
 
@@ -604,7 +734,7 @@ def render():
         st.warning(f"No {group_type}s found in the entities sheet.")
         return
 
-    # Always fetch DAILY first; aggregate to monthly for charts in group view
+    # Always fetch DAILY first (so we can aggregate reliably for charts/CSVs)
     daily_nse_parts, daily_bse_parts = [], []
     with st.status(f"Fetching daily data for {len(rows_to_fetch)} {group_type}s...", expanded=True) as status:
         with ThreadPoolExecutor(max_workers=8) as executor:
