@@ -106,7 +106,6 @@ def clamp_dates(start: dt.date, end: dt.date) -> Tuple[dt.date, dt.date]:
 # --------------------------- live fetchers ---------------------------
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    # No changes to BSE logic as requested
     scripcode = _normalize_bse_code(scripcode or "")
     if not scripcode: return pd.DataFrame(columns=["date", "close", "volume"])
     url = f"https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w?scripcode={scripcode}&flag=1&fromdate={start.strftime('%Y%m%d')}&todate={end.strftime('%Y%m%d')}&seriesid="
@@ -142,66 +141,69 @@ def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     """
-    NSE fetcher updated to use the 'NextApi' endpoint with csv=true.
-    Handles chunking (<= 1 year) and headers.
+    NSE fetcher using NextApi/GetQuoteApi with csv=true.
+    Includes explicit logging of periods and URLs for debugging.
     """
     if start > end: return pd.DataFrame(columns=["date", "close", "volume"])
 
-    # Basic headers to bypass simple bot checks.
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': 'https://www.nseindia.com/',
         'Accept': '*/*'
     }
 
-    # Initialize session to maintain cookies
     session = requests.Session()
     session.headers.update(headers)
     try:
         session.get("https://www.nseindia.com", timeout=10)
     except Exception:
-        pass # Proceed even if homepage load fails
+        pass 
 
     def fetch_chunk(d1, d2):
-        # New URL structure
+        # LOGGING: Print the period being searched
+        print(f"--- Fetching NSE Chunk: {d1} -> {d2} for {symbol} ---")
+        
         url = f"https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getHistoricalTradeData&symbol={symbol}&series={series}&fromDate={d1.strftime('%d-%m-%Y')}&toDate={d2.strftime('%d-%m-%Y')}&csv=true"
+        
+        # LOGGING: Print the exact URL being attempted
+        print(f"URL: {url}")
         
         try:
             r = session.get(url, timeout=15)
+            
+            # LOGGING: Print status
+            if r.status_code == 200:
+                print(f"✅ Success (200 OK). Payload size: {len(r.text)} chars")
+            else:
+                print(f"⚠️ Failed with Status Code: {r.status_code}")
+
             r.raise_for_status()
             
-            # The API returns CSV text directly because of csv=true
             csv_text = r.text
             if not csv_text or "Date" not in csv_text:
+                print("⚠️ Warning: Response content valid but empty or not CSV.")
                 return pd.DataFrame()
                 
-            # Parse CSV content
             df = pd.read_csv(io.StringIO(csv_text))
-            
-            # Clean column names (strip quotes/spaces)
             df.columns = [c.strip().replace('"', '') for c in df.columns]
             
-            # Required columns often found in this CSV format:
-            # "Date", "series", "OPEN", "HIGH", "LOW", "PREV. CLOSE", "ltp", "close", "vwap", "52W H", "52W L", "VOLUME", "VALUE", "No_of_trades"
-            
-            # Map columns to our standard format
-            # Note: Column names in the CSV might be slightly different case-wise, so we normalize.
             col_map = {c.lower(): c for c in df.columns}
-            
             if 'date' not in col_map or 'close' not in col_map or 'volume' not in col_map:
+                print(f"⚠️ Error: Missing columns. Found: {df.columns.tolist()}")
                 return pd.DataFrame()
 
             df["date"] = pd.to_datetime(df[col_map['date']], errors="coerce").dt.date
             df["close"] = pd.to_numeric(df[col_map['close']].astype(str).str.replace(',', ''), errors="coerce")
             df["volume"] = pd.to_numeric(df[col_map['volume']].astype(str).str.replace(',', ''), errors="coerce")
             
-            return df[["date", "close", "volume"]].dropna()
+            result = df[["date", "close", "volume"]].dropna()
+            print(f"✅ Processed {len(result)} rows for this chunk.")
+            return result
 
         except Exception as e:
-            # print(f"Error fetching chunk {d1}-{d2}: {e}")
+            print(f"❌ Exception fetching chunk {d1}-{d2}: {e}")
             return pd.DataFrame()
 
-    # Chunking Logic: Max 1 Year (365 days)
     CHUNK_DAYS = 365
     windows = []
     current_end = end
@@ -213,7 +215,9 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
     parts = [fetch_chunk(s, e) for s, e in windows]
     
     valid_parts = [p for p in parts if not p.empty]
-    if not valid_parts: return pd.DataFrame(columns=["date", "close", "volume"])
+    if not valid_parts: 
+        print(f"⚠️ No valid data found for {symbol} in any chunk.")
+        return pd.DataFrame(columns=["date", "close", "volume"])
     
     return pd.concat(valid_parts, ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
 
@@ -222,17 +226,14 @@ def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.D
 def fetch_single_entity(
     row: pd.Series, start: dt.date, end: dt.date, monthly_mode: bool
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    # No Supabase caching. Directly call the live fetchers.
     
     sym, series, scrip = row.get("NSE Symbol", ""), row.get("NSE Series", ""), row.get("BSE Scrip Code", "")
     
-    # Fetch NSE
     if sym and series:
         nse_df = get_nse_data(sym, series, start, end)
     else:
         nse_df = pd.DataFrame(columns=["date", "close", "volume"])
         
-    # Fetch BSE
     if scrip:
         bse_df = get_bse_data(scrip, start, end)
     else:
@@ -257,8 +258,6 @@ def render_sidebar(entities_df: pd.DataFrame):
     )
     mode = st.radio("Mode", ["Single Entity", "All REITs", "All InvITs"], key="trade_mode", horizontal=True)
     monthly_mode = st.checkbox("Monthly aggregation", value=(mode != "Single Entity"), help="volume=sum, close=last day of month", key="trade_monthly", disabled=(mode != "Single Entity"))
-    
-    # Supabase toggle removed
     
     entity_name = None
     if mode == "Single Entity":
