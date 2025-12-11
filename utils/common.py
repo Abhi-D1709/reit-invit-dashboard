@@ -18,7 +18,7 @@ DEFAULT_INVIT_FUND_URL = "https://docs.google.com/spreadsheets/d/1eepPHnjo31G3ue
 
 # Basic_Details (REIT / InvIT) – used only by tabs/basic_details.py
 DEFAULT_REIT_DIR_URL   = "https://docs.google.com/spreadsheets/d/1PnuNGHDskqBZt4WUO8JpmssaQ3nOUvLJolfwB7T5zDE/edit?usp=sharing"
-DEFAULT_INVIT_DIR_URL  = ""  # fill when your InvIT directory sheet is ready
+DEFAULT_INVIT_DIR_URL  = "https://docs.google.com/spreadsheets/d/1twj3iCRDOk46Hb8xGHgkDCW5hfUp170EltXKx0aepm8/edit?usp=sharing"  # fill when your InvIT directory sheet is ready
 
 # Trading entities (REIT/InvIT mapping) — you can change this sheet anytime
 ENTITIES_SHEET_ID = "1g44Lkv3VZU4FDTzrWXKhdxGwrWecZHHrZLmuRMyFHDI"
