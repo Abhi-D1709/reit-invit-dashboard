@@ -27,6 +27,10 @@ ENTITIES_SHEET_CSV = f"https://docs.google.com/spreadsheets/d/{ENTITIES_SHEET_ID
 # Sponsor Holding (REIT) – Sheet3 (gid=1466135872) of your master sheet
 DEFAULT_REIT_SPON_URL  = "https://docs.google.com/spreadsheets/d/1PnuNGHDskqBZt4WUO8JpmssaQ3nOUvLJolfwB7T5zDE/export?format=csv&gid=1466135872"
 
+# NDCF (REITs) – Public view link
+NDCF_REITS_SHEET_URL = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
+NDCF_INVITS_SHEET_URL = "" #to be added when available
+
 # Sponsor Holding (InvIT) – set this when your InvIT sheet is ready
 DEFAULT_INVIT_SPON_URL = ""
 
