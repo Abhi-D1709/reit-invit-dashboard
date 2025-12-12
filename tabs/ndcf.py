@@ -5,8 +5,6 @@ import numpy as np
 import re
 from typing import Optional
 
-st.set_page_config(page_title="NDCF", layout="wide")
-
 # ---- Config (overridden by utils.common if present) -------------------------
 DEFAULT_SHEET_URL_TRUST = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
 TRUST_SHEET_NAME = "NDCF REITs"
@@ -189,7 +187,7 @@ def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
     out["Within Computed Bound (SPV)"] = np.where(out[comp] > 0, out["Gap vs Computed (SPV)"].abs() < out[comp], np.nan)
     return out
 
-# ---- UI ---------------------------------------------------------------------
+# ---- UI (flow: REIT -> Level -> FY) -----------------------------------------
 def render():
     st.header("NDCF — Compliance Checks")
 
@@ -205,18 +203,38 @@ def render():
         st.info("InvIT checks will be added later.")
         return
 
+    # Load both sheets once; we'll scope options by chosen level later
     df_trust_all = load_reit_ndcf(data_url, TRUST_SHEET_NAME)
     df_spv_all   = load_reit_spv_ndcf(data_url, SPV_SHEET_NAME)
+
     if df_trust_all.empty:
         return
 
+    # 1) Choose REIT first
     ent = st.selectbox(
         "Choose REIT",
         sorted(df_trust_all["Name of REIT"].dropna().unique().tolist()),
         index=0,
         key="ndcf_reit_select",
     )
-    fy_options = sorted(df_trust_all.loc[df_trust_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
+
+    # 2) Choose analysis level next (Trust vs SPV)
+    level = st.radio(
+        "Analysis level",
+        ["Trust", "SPV/HoldCo"],
+        horizontal=True,
+        key="ndcf_level_select",
+    )
+
+    # 3) Choose FY (options depend on the chosen level)
+    if level == "Trust":
+        fy_options = sorted(df_trust_all.loc[df_trust_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
+    else:
+        if df_spv_all.empty:
+            fy_options = []
+        else:
+            fy_options = sorted(df_spv_all.loc[df_spv_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
+
     fy = st.selectbox(
         "Financial Year",
         ["— Select —"] + fy_options,
@@ -228,11 +246,13 @@ def render():
         st.info("Pick a Financial Year to show results.")
         return
 
-    # ---------- TRUST-LEVEL ----------
-    q_trust = df_trust_all[(df_trust_all["Name of REIT"] == ent) & (df_trust_all["Financial Year"] == fy)].copy()
-    if q_trust.empty:
-        st.warning("No TRUST-level rows for the selected REIT and Financial Year.")
-    else:
+    # ---------- TRUST-LEVEL (if selected) ----------
+    if level == "Trust":
+        q_trust = df_trust_all[(df_trust_all["Name of REIT"] == ent) & (df_trust_all["Financial Year"] == fy)].copy()
+        if q_trust.empty:
+            st.warning("No TRUST-level rows for the selected REIT and Financial Year.")
+            return
+
         q_trust = compute_trust_checks(q_trust)
 
         total = int(len(q_trust))
@@ -276,55 +296,53 @@ def render():
         if _fails(q_trust["Within 10% Gap"]).any():
             st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
-    st.divider()
+    # ---------- SPV-LEVEL (if selected) ----------
+    else:
+        if df_spv_all.empty:
+            st.info("SPV sheet could not be loaded or columns are missing; skipping SPV checks.")
+            return
 
-    # ---------- SPV-LEVEL ----------
-    st.subheader("SPV/HoldCo Checks (for selected REIT + FY)")
-    if df_spv_all.empty:
-        st.info("SPV sheet could not be loaded or columns are missing; skipping SPV checks.")
-        return
+        q_spv = df_spv_all[(df_spv_all["Name of REIT"] == ent) & (df_spv_all["Financial Year"] == fy)].copy()
+        if q_spv.empty:
+            st.warning("No SPV-level rows for the selected REIT and Financial Year.")
+            return
 
-    q_spv = df_spv_all[(df_spv_all["Name of REIT"] == ent) & (df_spv_all["Financial Year"] == fy)].copy()
-    if q_spv.empty:
-        st.warning("No SPV-level rows for the selected REIT and Financial Year.")
-        return
+        q_spv = compute_spv_checks(q_spv)
 
-    q_spv = compute_spv_checks(q_spv)
+        st.subheader("SPV Check 1 — Declared (incl. Surplus) ≥ 90% of Computed NDCF (by SPV/period)")
+        disp_s1 = q_spv[[
+            "Name of SPV",
+            "Name of Holdco (Leave Blank if N/A)",
+            "Financial Year",
+            "Period Ended",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Total Amount of NDCF declared for the period (incl. Surplus)",
+            "Payout Ratio %",
+            "Meets 90% Rule (SPV)",
+        ]].copy()
+        disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(_status)
+        st.dataframe(disp_s1, use_container_width=True, hide_index=True)
+        if _fails(q_spv["Meets 90% Rule (SPV)"]).any():
+            st.error("SPV: One or more SPV periods do **not** meet the 90% payout requirement.")
 
-    st.markdown("**SPV Check 1 — Declared (incl. Surplus) ≥ 90% of Computed NDCF (by SPV/period)**")
-    disp_s1 = q_spv[[
-        "Name of SPV",
-        "Name of Holdco (Leave Blank if N/A)",
-        "Financial Year",
-        "Period Ended",
-        "Total Amount of NDCF computed as per NDCF Statement",
-        "Total Amount of NDCF declared for the period (incl. Surplus)",
-        "Payout Ratio %",
-        "Meets 90% Rule (SPV)",
-    ]].copy()
-    disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(_status)
-    st.dataframe(disp_s1, use_container_width=True, hide_index=True)
-    if _fails(q_spv["Meets 90% Rule (SPV)"]).any():
-        st.error("SPV: One or more SPV periods do **not** meet the 90% payout requirement.")
+        st.subheader("SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed NDCF| < Computed NDCF")
+        disp_s2 = q_spv[[
+            "Name of SPV",
+            "Name of Holdco (Leave Blank if N/A)",
+            "Financial Year",
+            "Period Ended",
+            "SPV+HoldCo CF Sum",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Gap vs Computed (SPV)",
+            "Gap % of Computed (SPV)",
+            "Within Computed Bound (SPV)",
+        ]].copy()
+        disp_s2["Within Computed Bound (SPV)"] = disp_s2["Within Computed Bound (SPV)"].map(_status)
+        st.dataframe(disp_s2, use_container_width=True, hide_index=True)
+        if _fails(q_spv["Within Computed Bound (SPV)"]).any():
+            st.error("SPV: One or more SPV periods have |Gap| ≥ Computed NDCF.")
 
-    st.markdown("**SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed NDCF| < Computed NDCF**")
-    disp_s2 = q_spv[[
-        "Name of SPV",
-        "Name of Holdco (Leave Blank if N/A)",
-        "Financial Year",
-        "Period Ended",
-        "SPV+HoldCo CF Sum",
-        "Total Amount of NDCF computed as per NDCF Statement",
-        "Gap vs Computed (SPV)",
-        "Gap % of Computed (SPV)",
-        "Within Computed Bound (SPV)",
-    ]].copy()
-    disp_s2["Within Computed Bound (SPV)"] = disp_s2["Within Computed Bound (SPV)"].map(_status)
-    st.dataframe(disp_s2, use_container_width=True, hide_index=True)
-    if _fails(q_spv["Within Computed Bound (SPV)"]).any():
-        st.error("SPV: One or more SPV periods have |Gap| ≥ Computed NDCF.")
-
-# Exported entrypoints for pages/5_NDCF.py
+# Exported entrypoint for pages/5_NDCF.py
 def render_ndcf():
     render()
 
