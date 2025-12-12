@@ -11,17 +11,17 @@ from typing import Optional
 st.set_page_config(page_title="NDCF", layout="wide")
 
 # Defaults; can be overridden by utils.common if present
-DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
-DEFAULT_SHEET_NAME = "NDCF REITs"
+DEFAULT_SHEET_URL_TRUST = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
+TRUST_SHEET_NAME = "NDCF REITs"
+SPV_SHEET_NAME   = "NDCF SPV REIT"  # <- SPV-level sheet
 
 try:
-    # Optional: use the central URL if you added it in utils/common.py
+    # Optional centralised constants (won't raise if missing)
     from utils.common import NDCF_REITS_SHEET_URL  # type: ignore
     if NDCF_REITS_SHEET_URL:
-        DEFAULT_SHEET_URL = NDCF_REITS_SHEET_URL
+        DEFAULT_SHEET_URL_TRUST = NDCF_REITS_SHEET_URL
 except Exception:
     pass
-
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -61,10 +61,14 @@ def _to_number(x):
         return np.nan
 
 
+def _strip(s):
+    return str(s).strip() if pd.notna(s) else s
+
+
 # -----------------------------------------------------------------------------
-# Data load & checks
+# Data load — TRUST LEVEL
 # -----------------------------------------------------------------------------
-def load_reit_ndcf(url: str, sheet_name: str = DEFAULT_SHEET_NAME) -> pd.DataFrame:
+def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame:
     csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
     df = pd.read_csv(csv_url)
     df.columns = [c.strip() for c in df.columns]
@@ -92,23 +96,22 @@ def load_reit_ndcf(url: str, sheet_name: str = DEFAULT_SHEET_NAME) -> pd.DataFra
     ]
     missing = [c for c in needed if c not in df.columns]
     if missing:
-        st.error("The NDCF sheet does not have the expected columns. Missing: " + ", ".join(missing))
-        with st.expander("Show detected columns"):
+        st.error("The NDCF (Trust) sheet is missing expected columns: " + ", ".join(missing))
+        with st.expander("Show detected columns (Trust)"):
             st.write(list(df.columns))
         return df.iloc[0:0]
 
-    # Numeric conversions
+    # Numeric conversions (everything from 4th item)
     for c in needed[3:]:
         df[c] = df[c].map(_to_number)
 
-    # Clean text fields
     for c in ["Name of REIT", "Financial Year", "Period Ended"]:
-        df[c] = df[c].astype(str).str.strip()
+        df[c] = df[c].astype(str).map(_strip)
 
     return df
 
 
-def compute_checks(df: pd.DataFrame) -> pd.DataFrame:
+def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
     comp = "Total Amount of NDCF computed as per NDCF Statement"
     decl = "Total Amount of NDCF declared for the period (incl. Surplus)"
     cfo = "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
@@ -128,6 +131,108 @@ def compute_checks(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # -----------------------------------------------------------------------------
+# Data load — SPV LEVEL
+# -----------------------------------------------------------------------------
+def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFrame:
+    """
+    Expects columns (case/spacing tolerated):
+      Entity / Name of REIT
+      Name of SPV
+      Name of Holdco (Leave Blank if N/A)
+      Financial Year
+      Period Ended
+      Total Amount of NDCF computed as per NDCF Statement
+      Total Amount of NDCF declared for the period (incl. Surplus)
+      SPV Cash Flow From operating Activities ...
+      SPV Cash Flow From Investing Activities ...
+      SPV Cash Flow From Financing Activities ...
+      SPV Profit after tax ...
+      HoldCo Cash Flow From operating Activities ...
+      HoldCo Cash Flow From Investing Activities ...
+      Holdco Cash Flow From Financing Activities ...
+      Holdco Profit after tax ...
+    """
+    csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
+    df = pd.read_csv(csv_url)
+    df.columns = [c.strip() for c in df.columns]
+
+    # Harmonise names
+    rename_map = {
+        "Entity": "Name of REIT",
+        "Fincial Year": "Financial Year",
+        "Period": "Period Ended",
+        "Period ended": "Period Ended",
+        "Name of Holdco": "Name of Holdco (Leave Blank if N/A)",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    needed = [
+        "Name of REIT",
+        "Name of SPV",
+        "Name of Holdco (Leave Blank if N/A)",
+        "Financial Year",
+        "Period Ended",
+        "Total Amount of NDCF computed as per NDCF Statement",
+        "Total Amount of NDCF declared for the period (incl. Surplus)",
+        "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "SPV Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)",
+        "HoldCo Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "HoldCo Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "Holdco Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "Holdco Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)",
+    ]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        st.warning("The NDCF (SPV) sheet is missing expected columns: " + ", ".join(missing))
+        with st.expander("Show detected columns (SPV)"):
+            st.write(list(df.columns))
+        return df.iloc[0:0]
+
+    # Numeric conversions for money columns (skip entity/name/year/period)
+    numeric_cols = needed[5:]
+    for c in numeric_cols:
+        df[c] = df[c].map(_to_number)
+
+    for c in ["Name of REIT", "Financial Year", "Period Ended", "Name of SPV", "Name of Holdco (Leave Blank if N/A)"]:
+        df[c] = df[c].astype(str).map(_strip)
+
+    return df
+
+
+def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
+    comp = "Total Amount of NDCF computed as per NDCF Statement"
+    decl = "Total Amount of NDCF declared for the period (incl. Surplus)"
+
+    spv_cfo = "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    spv_cfi = "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    spv_cff = "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    spv_pat = "SPV Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
+
+    hco_cfo = "HoldCo Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    hco_cfi = "HoldCo Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    hco_cff = "Holdco Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    hco_pat = "Holdco Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
+
+    out = df.copy()
+    out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
+    out["Meets 90% Rule (SPV)"] = out["Payout Ratio %"] >= 90.0
+
+    out["SPV+HoldCo CF Sum"] = (
+        out[spv_cfo].fillna(0) + out[spv_cfi].fillna(0) + out[spv_cff].fillna(0) + out[spv_pat].fillna(0) +
+        out[hco_cfo].fillna(0) + out[hco_cfi].fillna(0) + out[hco_cff].fillna(0) + out[hco_pat].fillna(0)
+    )
+    out["Gap vs Computed (SPV)"] = out["SPV+HoldCo CF Sum"] - out[comp]
+    out["Gap % of Computed (SPV)"] = np.where(out[comp] != 0, (out["Gap vs Computed (SPV)"] / out[comp]) * 100.0, np.nan).round(2)
+
+    # User requirement: "difference ... should not be >= Total Amount of NDCF computed"
+    # i.e., abs(gap) < computed (where computed > 0)
+    out["Within Computed Bound (SPV)"] = np.where(out[comp] > 0, out["Gap vs Computed (SPV)"].abs() < out[comp], np.nan)
+    return out
+
+
+# -----------------------------------------------------------------------------
 # UI
 # -----------------------------------------------------------------------------
 def render():
@@ -137,28 +242,31 @@ def render():
         seg = st.selectbox("Select Segment", ["REIT", "InvIT"], index=0)
         data_url = st.text_input(
             "Data URL (Google Sheet - public view)",
-            value=DEFAULT_SHEET_URL,
-            help="Expected sheet name: 'NDCF REITs'.",
+            value=DEFAULT_SHEET_URL_TRUST,
+            help=f"Trust sheet: '{TRUST_SHEET_NAME}'. SPV sheet: '{SPV_SHEET_NAME}'.",
         )
 
     if seg != "REIT":
         st.info("InvIT checks will be added later.")
         return
 
-    df_all = load_reit_ndcf(data_url, DEFAULT_SHEET_NAME)
-    if df_all.empty:
+    # Load TRUST-level and SPV-level data
+    df_trust_all = load_reit_ndcf(data_url, TRUST_SHEET_NAME)
+    df_spv_all   = load_reit_spv_ndcf(data_url, SPV_SHEET_NAME)
+
+    if df_trust_all.empty:
         return
 
-    # Step 1: select REIT
+    # Step 1: select REIT (from trust sheet names)
     ent = st.selectbox(
         "Choose REIT",
-        sorted(df_all["Name of REIT"].dropna().unique().tolist()),
+        sorted(df_trust_all["Name of REIT"].dropna().unique().tolist()),
         index=0,
         key="ndcf_reit_select",
     )
 
     # Step 2: select Financial Year (only after REIT is chosen)
-    fy_options = sorted(df_all.loc[df_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
+    fy_options = sorted(df_trust_all.loc[df_trust_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
     fy = st.selectbox(
         "Financial Year",
         ["— Select —"] + fy_options,
@@ -172,62 +280,116 @@ def render():
         st.info("Pick a Financial Year to show results.")
         return
 
-    # Subset & compute checks
-    q = df_all[(df_all["Name of REIT"] == ent) & (df_all["Financial Year"] == fy)].copy()
-    if q.empty:
-        st.warning("No rows for the selected REIT and Financial Year.")
+    # ----------------------- TRUST-LEVEL CHECKS ------------------------------
+    q_trust = df_trust_all[(df_trust_all["Name of REIT"] == ent) & (df_trust_all["Financial Year"] == fy)].copy()
+    if q_trust.empty:
+        st.warning("No TRUST-level rows for the selected REIT and Financial Year.")
+    else:
+        q_trust = compute_trust_checks(q_trust)
+
+        total = int(len(q_trust))
+        good_payout = int(q_trust["Meets 90% Rule"].sum())
+        good_gap = int(q_trust["Within 10% Gap"].sum())
+        s1, s2, s3 = st.columns(3)
+        s1.metric("TRUST: periods meeting 90% payout", f"{good_payout}/{total}")
+        s2.metric("TRUST: periods within 10% gap", f"{good_gap}/{total}")
+        s3.metric("TRUST: rows analysed", f"{total}")
+
+        def status_icon(v: Optional[bool]) -> str:
+            if pd.isna(v):
+                return "—"
+            return "🟢" if bool(v) else "🔴"
+
+        st.subheader("Trust Check 1 — 90% payout of Computed NDCF (period-wise)")
+        disp1 = q_trust[[
+            "Financial Year",
+            "Period Ended",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Total Amount of NDCF declared for the period (incl. Surplus)",
+            "Payout Ratio %",
+            "Meets 90% Rule",
+        ]].copy()
+        disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(status_icon)
+        st.dataframe(disp1, use_container_width=True, hide_index=True)
+        if (~q_trust["Meets 90% Rule"].fillna(False)).any():
+            st.error("TRUST: One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF).")
+
+        st.subheader("Trust Check 2 — (CFO + CFI + CFF + PAT) gap vs Computed NDCF (period-wise)")
+        disp2 = q_trust[[
+            "Financial Year",
+            "Period Ended",
+            "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+            "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+            "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+            "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
+            "CF Sum",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Gap vs Computed",
+            "Gap % of Computed",
+            "Within 10% Gap",
+        ]].copy()
+        disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(status_icon)
+        st.dataframe(disp2, use_container_width=True, hide_index=True)
+        if (~q_trust["Within 10% Gap"].fillna(False)).any():
+            st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
+
+    st.divider()
+
+    # ----------------------- SPV-LEVEL CHECKS -------------------------------
+    st.subheader("SPV/HoldCo Checks (for selected REIT + FY)")
+
+    if df_spv_all.empty:
+        st.info("SPV sheet could not be loaded or columns are missing; skipping SPV checks.")
         return
-    q = compute_checks(q)
 
-    # Summary metrics
-    total = int(len(q))
-    good_payout = int(q["Meets 90% Rule"].sum())
-    good_gap = int(q["Within 10% Gap"].sum())
-    s1, s2, s3 = st.columns(3)
-    s1.metric("Periods meeting 90% payout", f"{good_payout}/{total}")
-    s2.metric("Periods within 10% gap", f"{good_gap}/{total}")
-    s3.metric("Rows analysed", f"{total}")
+    q_spv = df_spv_all[(df_spv_all["Name of REIT"] == ent) & (df_spv_all["Financial Year"] == fy)].copy()
+    if q_spv.empty:
+        st.warning("No SPV-level rows for the selected REIT and Financial Year.")
+        return
 
-    def status_icon(v: Optional[bool]) -> str:
+    q_spv = compute_spv_checks(q_spv)
+
+    def status_icon2(v: Optional[bool]) -> str:
         if pd.isna(v):
             return "—"
         return "🟢" if bool(v) else "🔴"
 
-    # ----------------------- TABLE 1: 90% PAYOUT RULE -----------------------
-    st.subheader("Check 1 — 90% payout of Computed NDCF (period-wise)")
-    disp1 = q[[
+    # SPV Check 1 — 90% payout
+    st.markdown("**SPV Check 1 — Declared (incl. Surplus) ≥ 90% of Computed NDCF (by SPV/period)**")
+    disp_s1 = q_spv[[
+        "Name of SPV",
+        "Name of Holdco (Leave Blank if N/A)",
         "Financial Year",
         "Period Ended",
         "Total Amount of NDCF computed as per NDCF Statement",
         "Total Amount of NDCF declared for the period (incl. Surplus)",
         "Payout Ratio %",
-        "Meets 90% Rule",
+        "Meets 90% Rule (SPV)",
     ]].copy()
-    disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(status_icon)
-    st.dataframe(disp1, use_container_width=True, hide_index=True)
-    if (~q["Meets 90% Rule"].fillna(False)).any():
-        st.error("One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF).")
+    disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(status_icon2)
+    st.dataframe(disp_s1, use_container_width=True, hide_index=True)
 
-    # ----------------------- TABLE 2: CF SUM vs COMPUTED --------------------
-    st.subheader("Check 2 — (CFO + CFI + CFF + PAT) gap vs Computed NDCF (period-wise)")
-    disp2 = q[[
+    if (~q_spv["Meets 90% Rule (SPV)"].fillna(False)).any():
+        st.error("SPV: One or more SPV periods do **not** meet the 90% payout requirement.")
+
+    # SPV Check 2 — (SPV+HoldCo CF Sum) vs Computed
+    st.markdown("**SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed NDCF| < Computed NDCF**")
+    disp_s2 = q_spv[[
+        "Name of SPV",
+        "Name of Holdco (Leave Blank if N/A)",
         "Financial Year",
         "Period Ended",
-        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
-        "CF Sum",
+        "SPV+HoldCo CF Sum",
         "Total Amount of NDCF computed as per NDCF Statement",
-        "Gap vs Computed",
-        "Gap % of Computed",
-        "Within 10% Gap",
+        "Gap vs Computed (SPV)",
+        "Gap % of Computed (SPV)",
+        "Within Computed Bound (SPV)",
     ]].copy()
-    disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(status_icon)
-    st.dataframe(disp2, use_container_width=True, hide_index=True)
-    if (~q["Within 10% Gap"].fillna(False)).any():
-        st.error("One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
+    disp_s2["Within Computed Bound (SPV)"] = disp_s2["Within Computed Bound (SPV)"].map(status_icon2)
+    st.dataframe(disp_s2, use_container_width=True, hide_index=True)
 
+    if (~q_spv["Within Computed Bound (SPV)"].fillna(False)).any():
+        st.error("SPV: One or more SPV periods have |Gap| ≥ Computed NDCF.")
 
 # For pages/5_NDCF.py
 if __name__ == "__main__":
