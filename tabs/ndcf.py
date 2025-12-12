@@ -5,32 +5,22 @@ import numpy as np
 import re
 from typing import Optional
 
-# -----------------------------------------------------------------------------
-# Page config
-# -----------------------------------------------------------------------------
 st.set_page_config(page_title="NDCF", layout="wide")
 
-# Defaults; can be overridden by utils.common if present
+# ---- Config (overridden by utils.common if present) -------------------------
 DEFAULT_SHEET_URL_TRUST = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
 TRUST_SHEET_NAME = "NDCF REITs"
-SPV_SHEET_NAME   = "NDCF SPV REIT"  # <- SPV-level sheet
+SPV_SHEET_NAME   = "NDCF SPV REIT"
 
 try:
-    # Optional centralised constants (won't raise if missing)
-    from utils.common import NDCF_REITS_SHEET_URL  # type: ignore
+    from utils.common import NDCF_REITS_SHEET_URL  # optional central location
     if NDCF_REITS_SHEET_URL:
         DEFAULT_SHEET_URL_TRUST = NDCF_REITS_SHEET_URL
 except Exception:
     pass
 
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
+# ---- Helpers ----------------------------------------------------------------
 def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[str] = None) -> str:
-    """
-    Build a CSV export URL for a Google Sheet. Prefer the sheet-name route,
-    fall back to gid if provided.
-    """
     m = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
     if not m:
         return url
@@ -42,9 +32,7 @@ def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[st
         return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(sheet)}"
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
-
 def _to_number(x):
-    """Parse numbers like '1,234.56', '-', '', '(123.45)' into floats/NaN."""
     if pd.isna(x):
         return np.nan
     if isinstance(x, (int, float, np.integer, np.floating)):
@@ -60,26 +48,29 @@ def _to_number(x):
     except ValueError:
         return np.nan
 
-
 def _strip(s):
     return str(s).strip() if pd.notna(s) else s
 
+def _fails(series: pd.Series) -> pd.Series:
+    """Return boolean mask of failures, safely handling NaN/object dtypes."""
+    return series.astype("boolean").fillna(False).eq(False)
 
-# -----------------------------------------------------------------------------
-# Data load — TRUST LEVEL
-# -----------------------------------------------------------------------------
+def _status(v: Optional[bool]) -> str:
+    if pd.isna(v):
+        return "—"
+    return "🟢" if bool(v) else "🔴"
+
+# ---- TRUST-LEVEL -------------------------------------------------------------
 def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame:
     csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
     df = pd.read_csv(csv_url)
     df.columns = [c.strip() for c in df.columns]
 
-    # Harmonise common variants/typos
     rename_map = {
         "Entity": "Name of REIT",
         "Fincial Year": "Financial Year",
         "Period": "Period Ended",
         "Period ended": "Period Ended",
-        "Period Ended": "Period Ended",
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
@@ -101,15 +92,11 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
             st.write(list(df.columns))
         return df.iloc[0:0]
 
-    # Numeric conversions (everything from 4th item)
     for c in needed[3:]:
         df[c] = df[c].map(_to_number)
-
     for c in ["Name of REIT", "Financial Year", "Period Ended"]:
         df[c] = df[c].astype(str).map(_strip)
-
     return df
-
 
 def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
     comp = "Total Amount of NDCF computed as per NDCF Statement"
@@ -129,34 +116,12 @@ def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
     out["Within 10% Gap"] = out["Gap % of Computed"].abs() <= 10.0
     return out
 
-
-# -----------------------------------------------------------------------------
-# Data load — SPV LEVEL
-# -----------------------------------------------------------------------------
+# ---- SPV-LEVEL ---------------------------------------------------------------
 def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFrame:
-    """
-    Expects columns (case/spacing tolerated):
-      Entity / Name of REIT
-      Name of SPV
-      Name of Holdco (Leave Blank if N/A)
-      Financial Year
-      Period Ended
-      Total Amount of NDCF computed as per NDCF Statement
-      Total Amount of NDCF declared for the period (incl. Surplus)
-      SPV Cash Flow From operating Activities ...
-      SPV Cash Flow From Investing Activities ...
-      SPV Cash Flow From Financing Activities ...
-      SPV Profit after tax ...
-      HoldCo Cash Flow From operating Activities ...
-      HoldCo Cash Flow From Investing Activities ...
-      Holdco Cash Flow From Financing Activities ...
-      Holdco Profit after tax ...
-    """
     csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
     df = pd.read_csv(csv_url)
     df.columns = [c.strip() for c in df.columns]
 
-    # Harmonise names
     rename_map = {
         "Entity": "Name of REIT",
         "Fincial Year": "Financial Year",
@@ -190,16 +155,11 @@ def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFra
             st.write(list(df.columns))
         return df.iloc[0:0]
 
-    # Numeric conversions for money columns (skip entity/name/year/period)
-    numeric_cols = needed[5:]
-    for c in numeric_cols:
+    for c in needed[5:]:
         df[c] = df[c].map(_to_number)
-
     for c in ["Name of REIT", "Financial Year", "Period Ended", "Name of SPV", "Name of Holdco (Leave Blank if N/A)"]:
         df[c] = df[c].astype(str).map(_strip)
-
     return df
-
 
 def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
     comp = "Total Amount of NDCF computed as per NDCF Statement"
@@ -225,16 +185,11 @@ def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
     )
     out["Gap vs Computed (SPV)"] = out["SPV+HoldCo CF Sum"] - out[comp]
     out["Gap % of Computed (SPV)"] = np.where(out[comp] != 0, (out["Gap vs Computed (SPV)"] / out[comp]) * 100.0, np.nan).round(2)
-
-    # User requirement: "difference ... should not be >= Total Amount of NDCF computed"
-    # i.e., abs(gap) < computed (where computed > 0)
+    # Requirement: |gap| < computed (i.e., not >= computed)
     out["Within Computed Bound (SPV)"] = np.where(out[comp] > 0, out["Gap vs Computed (SPV)"].abs() < out[comp], np.nan)
     return out
 
-
-# -----------------------------------------------------------------------------
-# UI
-# -----------------------------------------------------------------------------
+# ---- UI ---------------------------------------------------------------------
 def render():
     st.header("NDCF — Compliance Checks")
 
@@ -250,22 +205,17 @@ def render():
         st.info("InvIT checks will be added later.")
         return
 
-    # Load TRUST-level and SPV-level data
     df_trust_all = load_reit_ndcf(data_url, TRUST_SHEET_NAME)
     df_spv_all   = load_reit_spv_ndcf(data_url, SPV_SHEET_NAME)
-
     if df_trust_all.empty:
         return
 
-    # Step 1: select REIT (from trust sheet names)
     ent = st.selectbox(
         "Choose REIT",
         sorted(df_trust_all["Name of REIT"].dropna().unique().tolist()),
         index=0,
         key="ndcf_reit_select",
     )
-
-    # Step 2: select Financial Year (only after REIT is chosen)
     fy_options = sorted(df_trust_all.loc[df_trust_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
     fy = st.selectbox(
         "Financial Year",
@@ -274,13 +224,11 @@ def render():
         key="ndcf_fy_select",
         help="Pick a Financial Year to run the checks.",
     )
-
-    # Gate the analysis until FY is chosen
     if fy == "— Select —":
         st.info("Pick a Financial Year to show results.")
         return
 
-    # ----------------------- TRUST-LEVEL CHECKS ------------------------------
+    # ---------- TRUST-LEVEL ----------
     q_trust = df_trust_all[(df_trust_all["Name of REIT"] == ent) & (df_trust_all["Financial Year"] == fy)].copy()
     if q_trust.empty:
         st.warning("No TRUST-level rows for the selected REIT and Financial Year.")
@@ -288,17 +236,12 @@ def render():
         q_trust = compute_trust_checks(q_trust)
 
         total = int(len(q_trust))
-        good_payout = int(q_trust["Meets 90% Rule"].sum())
-        good_gap = int(q_trust["Within 10% Gap"].sum())
+        good_payout = int(q_trust["Meets 90% Rule"].astype("boolean").fillna(False).sum())
+        good_gap = int(q_trust["Within 10% Gap"].astype("boolean").fillna(False).sum())
         s1, s2, s3 = st.columns(3)
         s1.metric("TRUST: periods meeting 90% payout", f"{good_payout}/{total}")
         s2.metric("TRUST: periods within 10% gap", f"{good_gap}/{total}")
         s3.metric("TRUST: rows analysed", f"{total}")
-
-        def status_icon(v: Optional[bool]) -> str:
-            if pd.isna(v):
-                return "—"
-            return "🟢" if bool(v) else "🔴"
 
         st.subheader("Trust Check 1 — 90% payout of Computed NDCF (period-wise)")
         disp1 = q_trust[[
@@ -309,9 +252,9 @@ def render():
             "Payout Ratio %",
             "Meets 90% Rule",
         ]].copy()
-        disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(status_icon)
+        disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(_status)
         st.dataframe(disp1, use_container_width=True, hide_index=True)
-        if (~q_trust["Meets 90% Rule"].fillna(False)).any():
+        if _fails(q_trust["Meets 90% Rule"]).any():
             st.error("TRUST: One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF).")
 
         st.subheader("Trust Check 2 — (CFO + CFI + CFF + PAT) gap vs Computed NDCF (period-wise)")
@@ -328,16 +271,15 @@ def render():
             "Gap % of Computed",
             "Within 10% Gap",
         ]].copy()
-        disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(status_icon)
+        disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(_status)
         st.dataframe(disp2, use_container_width=True, hide_index=True)
-        if (~q_trust["Within 10% Gap"].fillna(False)).any():
+        if _fails(q_trust["Within 10% Gap"]).any():
             st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
     st.divider()
 
-    # ----------------------- SPV-LEVEL CHECKS -------------------------------
+    # ---------- SPV-LEVEL ----------
     st.subheader("SPV/HoldCo Checks (for selected REIT + FY)")
-
     if df_spv_all.empty:
         st.info("SPV sheet could not be loaded or columns are missing; skipping SPV checks.")
         return
@@ -349,12 +291,6 @@ def render():
 
     q_spv = compute_spv_checks(q_spv)
 
-    def status_icon2(v: Optional[bool]) -> str:
-        if pd.isna(v):
-            return "—"
-        return "🟢" if bool(v) else "🔴"
-
-    # SPV Check 1 — 90% payout
     st.markdown("**SPV Check 1 — Declared (incl. Surplus) ≥ 90% of Computed NDCF (by SPV/period)**")
     disp_s1 = q_spv[[
         "Name of SPV",
@@ -366,13 +302,11 @@ def render():
         "Payout Ratio %",
         "Meets 90% Rule (SPV)",
     ]].copy()
-    disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(status_icon2)
+    disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(_status)
     st.dataframe(disp_s1, use_container_width=True, hide_index=True)
-
-    if (~q_spv["Meets 90% Rule (SPV)"].fillna(False)).any():
+    if _fails(q_spv["Meets 90% Rule (SPV)"]).any():
         st.error("SPV: One or more SPV periods do **not** meet the 90% payout requirement.")
 
-    # SPV Check 2 — (SPV+HoldCo CF Sum) vs Computed
     st.markdown("**SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed NDCF| < Computed NDCF**")
     disp_s2 = q_spv[[
         "Name of SPV",
@@ -385,12 +319,14 @@ def render():
         "Gap % of Computed (SPV)",
         "Within Computed Bound (SPV)",
     ]].copy()
-    disp_s2["Within Computed Bound (SPV)"] = disp_s2["Within Computed Bound (SPV)"].map(status_icon2)
+    disp_s2["Within Computed Bound (SPV)"] = disp_s2["Within Computed Bound (SPV)"].map(_status)
     st.dataframe(disp_s2, use_container_width=True, hide_index=True)
-
-    if (~q_spv["Within Computed Bound (SPV)"].fillna(False)).any():
+    if _fails(q_spv["Within Computed Bound (SPV)"]).any():
         st.error("SPV: One or more SPV periods have |Gap| ≥ Computed NDCF.")
 
-# For pages/5_NDCF.py
+# Exported entrypoints for pages/5_NDCF.py
+def render_ndcf():
+    render()
+
 if __name__ == "__main__":
     render()
