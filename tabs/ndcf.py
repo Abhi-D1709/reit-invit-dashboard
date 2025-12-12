@@ -1,3 +1,4 @@
+# tabs/ndcf.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -148,24 +149,40 @@ def render():
     if df_all.empty:
         return
 
-    c1, c2 = st.columns([1.2, 0.6])
-    with c1:
-        ent = st.selectbox("Choose REIT", sorted(df_all["Name of REIT"].dropna().unique().tolist()))
-    with c2:
-        fy_options = ["All"] + sorted(df_all.loc[df_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
-        fy = st.selectbox("Financial Year", fy_options, index=0)
+    # Step 1: select REIT
+    ent = st.selectbox(
+        "Choose REIT",
+        sorted(df_all["Name of REIT"].dropna().unique().tolist()),
+        index=0,
+        key="ndcf_reit_select",
+    )
 
-    q = df_all[df_all["Name of REIT"] == ent].copy()
-    if fy != "All":
-        q = q[q["Financial Year"] == fy]
+    # Step 2: select Financial Year (only after REIT is chosen)
+    fy_options = sorted(df_all.loc[df_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
+    fy = st.selectbox(
+        "Financial Year",
+        ["— Select —"] + fy_options,
+        index=0,
+        key="ndcf_fy_select",
+        help="Pick a Financial Year to run the checks.",
+    )
 
+    # Gate the analysis until FY is chosen
+    if fy == "— Select —":
+        st.info("Pick a Financial Year to show results.")
+        return
+
+    # Subset & compute checks
+    q = df_all[(df_all["Name of REIT"] == ent) & (df_all["Financial Year"] == fy)].copy()
+    if q.empty:
+        st.warning("No rows for the selected REIT and Financial Year.")
+        return
     q = compute_checks(q)
 
-    # Summary
+    # Summary metrics
     total = int(len(q))
     good_payout = int(q["Meets 90% Rule"].sum())
     good_gap = int(q["Within 10% Gap"].sum())
-
     s1, s2, s3 = st.columns(3)
     s1.metric("Periods meeting 90% payout", f"{good_payout}/{total}")
     s2.metric("Periods within 10% gap", f"{good_gap}/{total}")
@@ -176,36 +193,42 @@ def render():
             return "—"
         return "🟢" if bool(v) else "🔴"
 
-    disp = q[[
+    # ----------------------- TABLE 1: 90% PAYOUT RULE -----------------------
+    st.subheader("Check 1 — 90% payout of Computed NDCF (period-wise)")
+    disp1 = q[[
         "Financial Year",
         "Period Ended",
         "Total Amount of NDCF computed as per NDCF Statement",
         "Total Amount of NDCF declared for the period (incl. Surplus)",
         "Payout Ratio %",
         "Meets 90% Rule",
+    ]].copy()
+    disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(status_icon)
+    st.dataframe(disp1, use_container_width=True, hide_index=True)
+    if (~q["Meets 90% Rule"].fillna(False)).any():
+        st.error("One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF).")
+
+    # ----------------------- TABLE 2: CF SUM vs COMPUTED --------------------
+    st.subheader("Check 2 — (CFO + CFI + CFF + PAT) gap vs Computed NDCF (period-wise)")
+    disp2 = q[[
+        "Financial Year",
+        "Period Ended",
         "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
         "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
         "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
         "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
         "CF Sum",
+        "Total Amount of NDCF computed as per NDCF Statement",
         "Gap vs Computed",
         "Gap % of Computed",
         "Within 10% Gap",
     ]].copy()
-
-    disp["Meets 90% Rule"] = disp["Meets 90% Rule"].map(status_icon)
-    disp["Within 10% Gap"] = disp["Within 10% Gap"].map(status_icon)
-
-    st.write("### Period-wise results")
-    st.dataframe(disp, use_container_width=True, hide_index=True)
-
-    # Alerts
-    if (~q["Meets 90% Rule"].fillna(False)).any():
-        st.error("One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF).")
+    disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(status_icon)
+    st.dataframe(disp2, use_container_width=True, hide_index=True)
     if (~q["Within 10% Gap"].fillna(False)).any():
         st.error("One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
 
-# For pages/4_NDCF.py
+# For pages/5_NDCF.py
 if __name__ == "__main__":
     render()
