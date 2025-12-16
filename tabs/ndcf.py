@@ -64,7 +64,6 @@ def _to_date(s) -> pd.Timestamp:
     if pd.isna(s):
         return pd.NaT
     try:
-        # handle strings like 01/04/2019, dd-mm-yyyy, etc.
         dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
         if pd.isna(dt):
             return pd.NaT
@@ -78,7 +77,6 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
     df = pd.read_csv(csv_url)
     df.columns = [c.strip() for c in df.columns]
 
-    # Normalize some common header variants
     rename_map = {
         "Entity": "Name of REIT",
         "Fincial Year": "Financial Year",
@@ -88,10 +86,8 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
         "Record Date": "Record Date",
         "Date of Distribution of NDCF by REIT": "Distribution Date",
     }
-    # apply known renames if present
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # If the specific date columns are still missing, try to match loosely
     def _find_col(cols, *tokens):
         for c in cols:
             cl = c.lower().replace("finalisation", "finalization")
@@ -130,14 +126,11 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
             st.write(list(df.columns))
         return df.iloc[0:0]
 
-    # Numeric conversions
     for c in needed[3:]:
         df[c] = df[c].map(_to_number)
-    # String for keys
     for c in ["Name of REIT", "Financial Year", "Period Ended"]:
         df[c] = df[c].astype(str).map(_strip)
 
-    # Parse timeline dates if present
     if "Declaration Date" in df.columns:
         df["Declaration Date"] = df["Declaration Date"].map(_to_date)
     if "Record Date" in df.columns:
@@ -170,12 +163,11 @@ def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
     """
-    New: Check the date gaps
+    Check the date gaps
       - Declaration → Record Date <= 2 days
       - Record Date → Distribution Date <= 5 days
     """
     if not {"Declaration Date", "Record Date", "Distribution Date"}.issubset(df.columns):
-        # Create empty frame to signal N/A
         return pd.DataFrame(columns=[
             "Financial Year", "Period Ended",
             "Declaration Date", "Record Date", "Distribution Date",
@@ -187,7 +179,6 @@ def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
     t["Days Decl→Record"] = (t["Record Date"] - t["Declaration Date"]).dt.days
     t["Days Record→Distr"] = (t["Distribution Date"] - t["Record Date"]).dt.days
 
-    # Must be non-negative and within thresholds
     t["Record ≤ 2 days"] = (t["Days Decl→Record"] >= 0) & (t["Days Decl→Record"] <= 2)
     t["Distribution ≤ 5 days"] = (t["Days Record→Distr"] >= 0) & (t["Days Record→Distr"] <= 5)
 
@@ -282,13 +273,11 @@ def load_offer_doc_links(dir_url: Optional[str]) -> pd.DataFrame:
         csv_url = _csv_url_from_gsheet(dir_url, sheet="Sheet5")
         df = pd.read_csv(csv_url)
         df.columns = [c.strip() for c in df.columns]
-        # Try to find the two columns
         ent_col = next((c for c in df.columns if "name" in c.lower() and "reit" in c.lower()), None)
         link_col = next((c for c in df.columns if "od" in c.lower() and "link" in c.lower()), None)
         if not ent_col:
             ent_col = "Name of REIT" if "Name of REIT" in df.columns else df.columns[0]
         if not link_col:
-            # fallback: any column that looks like a URL
             candidates = [c for c in df.columns if "link" in c.lower() or "http" in "".join(df[c].astype(str).tolist()).lower()]
             link_col = candidates[0] if candidates else df.columns[-1]
         return df[[ent_col, link_col]].rename(columns={ent_col: "Name of REIT", link_col: "OD Link"})
@@ -405,21 +394,36 @@ def render():
         if (~q_trust["Within 10% Gap"].astype("boolean").fillna(False)).any():
             st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
-        # New: timeline checks
-        st.subheader("Trust Check 3 — Declaration/Record/Distribution timeliness")
+        # -------- NEW: timeline checks split into two separate tables --------
         tline = compute_trust_timeline_checks(q_trust)
         if tline.empty:
             st.info("Declaration / Record / Distribution columns not found; timeline checks skipped.")
         else:
-            show = tline.copy()
-            show["Record ≤ 2 days"] = show["Record ≤ 2 days"].map(_status)
-            show["Distribution ≤ 5 days"] = show["Distribution ≤ 5 days"].map(_status)
-            st.dataframe(show, use_container_width=True, hide_index=True)
-            # Alerts
-            bad1 = tline["Record ≤ 2 days"] == False
-            bad2 = tline["Distribution ≤ 5 days"] == False
+            # 3a) Declaration → Record Date (≤ 2 days)
+            st.subheader("Trust Check 3a — Declaration → Record Date (≤ 2 days)")
+            t1 = tline[[
+                "Financial Year", "Period Ended",
+                "Declaration Date", "Record Date",
+                "Days Decl→Record", "Record ≤ 2 days"
+            ]].copy()
+            t1["Record ≤ 2 days"] = t1["Record ≤ 2 days"].map(_status)
+            st.dataframe(t1, use_container_width=True, hide_index=True)
+
+            bad1 = (tline["Record ≤ 2 days"] == False)
             if bad1.any():
                 st.error("TRUST: One or more periods have **Record Date more than 2 days after Declaration**.")
+
+            # 3b) Record Date → Distribution Date (≤ 5 days)
+            st.subheader("Trust Check 3b — Record Date → Distribution Date (≤ 5 days)")
+            t2 = tline[[
+                "Financial Year", "Period Ended",
+                "Record Date", "Distribution Date",
+                "Days Record→Distr", "Distribution ≤ 5 days"
+            ]].copy()
+            t2["Distribution ≤ 5 days"] = t2["Distribution ≤ 5 days"].map(_status)
+            st.dataframe(t2, use_container_width=True, hide_index=True)
+
+            bad2 = (tline["Distribution ≤ 5 days"] == False)
             if bad2.any():
                 st.error("TRUST: One or more periods have **Distribution Date more than 5 days after Record Date**.")
 
