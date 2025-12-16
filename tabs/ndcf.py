@@ -5,12 +5,12 @@ import numpy as np
 import re
 from typing import Optional
 
-# ---- Config (may be overridden by utils.common) -----------------------------
+# ---------- Config (can be overridden by utils.common) ----------
 DEFAULT_SHEET_URL_TRUST = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
 TRUST_SHEET_NAME = "NDCF REITs"
 SPV_SHEET_NAME   = "NDCF SPV REIT"
 
-DEFAULT_REIT_DIR_URL = None  # Offer Document links workbook (Sheet5)
+DEFAULT_REIT_DIR_URL = None  # offer-document links workbook (Sheet5)
 
 try:
     from utils.common import NDCF_REITS_SHEET_URL, DEFAULT_REIT_DIR_URL as _DIR_URL
@@ -21,7 +21,7 @@ try:
 except Exception:
     pass
 
-# ---- Helpers ----------------------------------------------------------------
+# ---------- Small helpers ----------
 def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[str] = None) -> str:
     m = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
     if not m:
@@ -33,6 +33,9 @@ def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[st
         from urllib.parse import quote
         return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(sheet)}"
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+
+def _strip(s):
+    return str(s).strip() if pd.notna(s) else s
 
 def _to_number(x):
     if pd.isna(x):
@@ -50,77 +53,80 @@ def _to_number(x):
     except ValueError:
         return np.nan
 
-def _strip(s):
-    return str(s).strip() if pd.notna(s) else s
-
 def _status(v: Optional[bool]) -> str:
     if pd.isna(v):
         return "—"
     return "🟢" if bool(v) else "🔴"
 
+# ---------- Robust date parsing ----------
 def _to_date(val) -> pd.Timestamp:
     """
-    Robust date parser:
-      - handles blanks/None/"-"
-      - parses common text formats with dayfirst
-      - converts Excel serial numbers
-      - converts numeric strings that are Excel serials
-    Returns pd.NaT when not parseable.
+    Robust parser for Google Sheet dates:
+      • handles blanks/'None'/'-'
+      • parses common text formats, day-first
+      • converts Excel serials (e.g., 45246 or '45246.0')
+      • sanitizes out invisible characters before a last-chance parse
     """
     if pd.isna(val):
         return pd.NaT
 
-    # Numeric (possibly Excel serial)
+    # Excel serial (native numeric)
     if isinstance(val, (int, float, np.integer, np.floating)):
         if np.isnan(val):
             return pd.NaT
-        # Excel serial day range heuristic
-        if 10_000 <= float(val) <= 80_000:
+        # plausible Excel date range (roughly 1990…2140)
+        if 10000 <= float(val) <= 80000:
             return pd.to_datetime(val, unit="D", origin="1899-12-30", errors="coerce")
-        # If not in plausible serial range, try generic numeric parse
         return pd.to_datetime(val, errors="coerce", dayfirst=True)
 
     s = str(val).strip()
     if s == "" or s.lower() in {"none", "null", "-", "na", "nat"}:
         return pd.NaT
 
-    # Numeric string that could be Excel serial (e.g., "45251")
+    # Numeric string that might be an Excel serial
     if re.fullmatch(r"\d{5}", s) or re.fullmatch(r"\d{4,6}\.\d+", s):
         try:
             f = float(s)
-            if 10_000 <= f <= 80_000:
+            if 10000 <= f <= 80000:
                 return pd.to_datetime(f, unit="D", origin="1899-12-30", errors="coerce")
         except Exception:
             pass
 
-    # Remove time zone text, keep date/time
-    s = s.replace("T00:00:00", " 00:00:00")
-    s = re.sub(r"\s*\(.*?\)$", "", s)  # drop trailing parentheses comments
+    # First attempt: direct flexible parse
+    try:
+        dt = pd.to_datetime(s, errors="raise", dayfirst=True, infer_datetime_format=True)
+        return pd.to_datetime(dt.date())
+    except Exception:
+        pass
 
-    # Try multiple parses
-    for fmt in [None, "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
+    # Second attempt: try a few explicit formats
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
-            if fmt:
-                dt = pd.to_datetime(s, format=fmt, errors="raise", dayfirst=True)
-            else:
-                dt = pd.to_datetime(s, errors="raise", dayfirst=True, infer_datetime_format=True)
-            return pd.to_datetime(dt.date())  # normalize to date only
+            dt = pd.to_datetime(s, format=fmt, errors="raise", dayfirst=True)
+            return pd.to_datetime(dt.date())
         except Exception:
             continue
-    return pd.NaT
 
-# ---- TRUST-LEVEL -------------------------------------------------------------
+    # Final attempt: strip everything except digits, slashes and hyphens
+    s2 = re.sub(r"[^0-9/\-]", "", s)
+    try:
+        dt = pd.to_datetime(s2, errors="raise", dayfirst=True, infer_datetime_format=True)
+        return pd.to_datetime(dt.date())
+    except Exception:
+        return pd.NaT
+
+# ---------- TRUST-level load & checks ----------
 def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame:
     csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
     df = pd.read_csv(csv_url)
     df.columns = [c.strip() for c in df.columns]
 
+    # Accept both spellings of 'Finalisation/Filisation'
     rename_map = {
         "Entity": "Name of REIT",
         "Fincial Year": "Financial Year",
         "Period": "Period Ended",
         "Period ended": "Period Ended",
-        # Both spellings below are supported:
         "Date of Finalisation/Declaration of NDCF Statement by REIT": "Declaration Date",
         "Date of Filisation/Declaration of NDCF Statement by REIT": "Declaration Date",
         "Record Date": "Record Date",
@@ -128,16 +134,19 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # Fallback discovery for unusual headers
+    # Fallback discovery for unusual headers (just in case)
     def _find_col(cols, *tokens):
         for c in cols:
-            cl = c.lower().replace("finalisation", "finalization").replace("filisation", "finalization")
+            cl = c.lower()
+            cl = cl.replace("finalisation", "finalization").replace("filisation", "finalization")
             if all(t in cl for t in tokens):
                 return c
         return None
 
     if "Declaration Date" not in df.columns:
-        cand = _find_col(df.columns, "declar") or _find_col(df.columns, "finaliz", "ndcf")
+        cand = _find_col(df.columns, "declar")
+        if not cand:
+            cand = _find_col(df.columns, "finaliz", "ndcf")
         if cand:
             df = df.rename(columns={cand: "Declaration Date"})
     if "Record Date" not in df.columns:
@@ -172,7 +181,7 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
     for c in ["Name of REIT", "Financial Year", "Period Ended"]:
         df[c] = df[c].astype(str).map(_strip)
 
-    # Parse dates robustly
+    # Parse dates with hardened parser
     if "Declaration Date" in df.columns:
         df["Declaration Date"] = df["Declaration Date"].map(_to_date)
     if "Record Date" in df.columns:
@@ -216,7 +225,7 @@ def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
         "Days Decl→Record","Record ≤ 2 days","Days Record→Distr","Distribution ≤ 5 days"
     ]].copy()
 
-# ---- SPV-LEVEL ---------------------------------------------------------------
+# ---------- SPV-level load & checks ----------
 def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFrame:
     csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
     df = pd.read_csv(csv_url)
@@ -284,7 +293,7 @@ def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
     out["Within Computed Bound (SPV)"] = np.where(out[comp] > 0, out["Gap vs Computed (SPV)"].abs() < out[comp], np.nan)
     return out
 
-# ---- Offer Document links (Sheet5) ------------------------------------------
+# ---------- Offer Document links (Sheet5 of DEFAULT_REIT_DIR_URL) ----------
 def load_offer_doc_links(dir_url: Optional[str]) -> pd.DataFrame:
     if not dir_url:
         return pd.DataFrame(columns=["Name of REIT", "OD Link"])
@@ -303,7 +312,7 @@ def load_offer_doc_links(dir_url: Optional[str]) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["Name of REIT", "OD Link"])
 
-# ---- UI ---------------------------------------------------------------------
+# ---------- UI ----------
 def render():
     st.header("NDCF — Compliance Checks")
 
@@ -394,7 +403,7 @@ def render():
         if (~q_trust["Within 10% Gap"].astype("boolean").fillna(False)).any():
             st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
-        # Timeline checks (split tables)
+        # Timeline checks (split)
         tline = compute_trust_timeline_checks(q_trust)
         if tline.empty:
             st.info("Declaration / Record / Distribution columns not found; timeline checks skipped.")
@@ -416,6 +425,10 @@ def render():
             st.dataframe(t2, use_container_width=True, hide_index=True)
             if (tline["Distribution ≤ 5 days"] == False).any():
                 st.error("TRUST: One or more periods have **Distribution Date more than 5 days after Record Date**.")
+
+            # Optional: quick peek at the raw strings we actually read (diagnostics)
+            with st.expander("Show raw date values (diagnostics)"):
+                st.write(q_trust[["Declaration Date","Record Date","Distribution Date"]].astype(str).head(10))
 
     else:
         if df_spv_all.empty:
