@@ -84,7 +84,6 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
         "Fincial Year": "Financial Year",
         "Period": "Period Ended",
         "Period ended": "Period Ended",
-        # handle typos for the declaration/finalisation column
         "Date of Finalisation/Declaration of NDCF Statement by REIT": "Declaration Date",
         "Record Date": "Record Date",
         "Date of Distribution of NDCF by REIT": "Distribution Date",
