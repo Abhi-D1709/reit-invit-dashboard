@@ -85,10 +85,7 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
         "Period": "Period Ended",
         "Period ended": "Period Ended",
         # handle typos for the declaration/finalisation column
-        "Date of Filisation/Declaration of NDCF Statement by REIT": "Declaration Date",
         "Date of Finalisation/Declaration of NDCF Statement by REIT": "Declaration Date",
-        "Date of Finalisation of NDCF Statement by REIT": "Declaration Date",
-        "Date of Declaration of NDCF Statement by REIT": "Declaration Date",
         "Record Date": "Record Date",
         "Date of Distribution of NDCF by REIT": "Distribution Date",
     }
@@ -409,22 +406,37 @@ def render():
         if (~q_trust["Within 10% Gap"].astype("boolean").fillna(False)).any():
             st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
-        # New: timeline checks
-        st.subheader("Trust Check 3 — Declaration/Record/Distribution timeliness")
+        # New: timeline checks (split into two separate checks)
+        st.subheader("Trust Check 3 — Declaration → Record Date (≤ 2 days)")
+
         tline = compute_trust_timeline_checks(q_trust)
         if tline.empty:
             st.info("Declaration / Record / Distribution columns not found; timeline checks skipped.")
         else:
-            show = tline.copy()
-            show["Record ≤ 2 days"] = show["Record ≤ 2 days"].map(_status)
-            show["Distribution ≤ 5 days"] = show["Distribution ≤ 5 days"].map(_status)
-            st.dataframe(show, use_container_width=True, hide_index=True)
-            # Alerts
-            bad1 = tline["Record ≤ 2 days"] == False
-            bad2 = tline["Distribution ≤ 5 days"] == False
-            if bad1.any():
+            t1 = tline[[
+                "Financial Year", "Period Ended",
+                "Declaration Date", "Record Date",
+                "Days Decl→Record", "Record ≤ 2 days"
+            ]].copy()
+            t1["Record ≤ 2 days"] = t1["Record ≤ 2 days"].map(_status)
+            st.dataframe(t1, use_container_width=True, hide_index=True)
+
+            bad_decl_record = (tline["Record ≤ 2 days"] == False)
+            if bad_decl_record.any():
                 st.error("TRUST: One or more periods have **Record Date more than 2 days after Declaration**.")
-            if bad2.any():
+
+            st.subheader("Trust Check 4 — Record Date → Distribution Date (≤ 5 days)")
+
+            t2 = tline[[
+                "Financial Year", "Period Ended",
+                "Record Date", "Distribution Date",
+                "Days Record→Distr", "Distribution ≤ 5 days"
+            ]].copy()
+            t2["Distribution ≤ 5 days"] = t2["Distribution ≤ 5 days"].map(_status)
+            st.dataframe(t2, use_container_width=True, hide_index=True)
+
+            bad_record_dist = (tline["Distribution ≤ 5 days"] == False)
+            if bad_record_dist.any():
                 st.error("TRUST: One or more periods have **Distribution Date more than 5 days after Record Date**.")
 
     # ---------- SPV-LEVEL (if selected) ----------
