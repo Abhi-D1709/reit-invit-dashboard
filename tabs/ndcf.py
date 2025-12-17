@@ -5,7 +5,7 @@ import numpy as np
 import re
 from typing import Optional
 
-# ---------- Config (overridden by utils.common if present) ----------
+# -------- Defaults (can be overridden by utils.common) --------
 DEFAULT_SHEET_URL_TRUST = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
 TRUST_SHEET_NAME = "NDCF REITs"
 SPV_SHEET_NAME   = "NDCF SPV REIT"
@@ -20,7 +20,25 @@ try:
 except Exception:
     pass
 
-# ---------- helpers ----------
+# Canonical column names used in your sheet (trust level)
+COMP_COL = "Total Amount of NDCF computed as per NDCF Statement"
+DECL_INCL_COL = "Total Amount of NDCF declared for the period (incl. Surplus)"
+CFO_COL = "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
+CFI_COL = "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
+CFF_COL = "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
+PAT_COL = "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)"
+
+# Canonical column names used in your sheet (SPV level)
+SPV_CFO = "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+SPV_CFI = "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+SPV_CFF = "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+SPV_PAT = "SPV Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
+HCO_CFO = "HoldCo Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+HCO_CFI = "HoldCo Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+HCO_CFF = "Holdco Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+HCO_PAT = "Holdco Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
+
+# ------------------------ helpers ------------------------
 def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[str] = None) -> str:
     m = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
     if not m:
@@ -55,16 +73,13 @@ def _status(v: Optional[bool]) -> str:
         return "—"
     return "🟢" if bool(v) else "🔴"
 
-# --------- robust date parsing from RAW text ----------
 def _to_date(val) -> pd.Timestamp:
     if val is None:
         return pd.NaT
-    # Excel serial passed as number-like string
     s = str(val).strip()
     if s == "" or s.lower() in {"none", "null", "na", "-", "nat"}:
         return pd.NaT
-
-    # numeric serials
+    # Excel serials
     if re.fullmatch(r"\d{5,6}(\.\d+)?", s):
         try:
             f = float(s)
@@ -72,23 +87,13 @@ def _to_date(val) -> pd.Timestamp:
                 return pd.to_datetime(f, unit="D", origin="1899-12-30", errors="coerce")
         except Exception:
             pass
-
-    # first try flexible day-first
+    # flexible parse (dayfirst)
     try:
         dt = pd.to_datetime(s, errors="raise", dayfirst=True, infer_datetime_format=True)
         return pd.to_datetime(dt.date())
     except Exception:
         pass
-
-    # explicit formats
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-        try:
-            dt = pd.to_datetime(s, format=fmt, errors="raise", dayfirst=True)
-            return pd.to_datetime(dt.date())
-        except Exception:
-            continue
-
-    # sanitize stray chars (NBSP, zero-width, commas, etc.)
+    # sanitize and retry
     s2 = re.sub(r"[^0-9/\-]", "", s)
     try:
         dt = pd.to_datetime(s2, errors="raise", dayfirst=True, infer_datetime_format=True)
@@ -96,14 +101,12 @@ def _to_date(val) -> pd.Timestamp:
     except Exception:
         return pd.NaT
 
-# ---------- TRUST-level load ----------
+# ------------------- loaders -------------------
 def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame:
     csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
-    # IMPORTANT: read raw text exactly as-is
     df = pd.read_csv(csv_url, dtype=str, keep_default_na=False)
     df.columns = [c.strip() for c in df.columns]
 
-    # normalize key headers
     rename_map = {
         "Entity": "Name of REIT",
         "Fincial Year": "Financial Year",
@@ -116,21 +119,13 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # keep RAW copies of date columns
+    # keep raw date strings
     for col in ["Declaration Date", "Record Date", "Distribution Date"]:
         if col in df.columns:
             df[f"{col}__raw"] = df[col]
 
-    # numeric conversions (safe, starting from strings)
-    numeric_cols = [
-        "Total Amount of NDCF computed as per NDCF Statement",
-        "Total Amount of NDCF declared for the period (incl. Surplus)",
-        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
-    ]
-    for c in numeric_cols:
+    # numeric conversions
+    for c in [COMP_COL, DECL_INCL_COL, CFO_COL, CFI_COL, CFF_COL, PAT_COL]:
         if c in df.columns:
             df[c] = df[c].map(_to_number)
 
@@ -138,7 +133,7 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
         if c in df.columns:
             df[c] = df[c].map(_strip)
 
-    # parse dates from RAW
+    # parse from raw
     if "Declaration Date__raw" in df.columns:
         df["Declaration Date"] = df["Declaration Date__raw"].map(_to_date)
     if "Record Date__raw" in df.columns:
@@ -148,42 +143,6 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
 
     return df
 
-# ---------- TRUST checks ----------
-def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
-    comp = "Total Amount of NDCF computed as per NDCF Statement"
-    decl = "Total Amount of NDCF declared for the period (incl. Surplus)"
-    cfo = "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
-    cfi = "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
-    cff = "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
-    pat = "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)"
-
-    out = df.copy()
-    out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
-    out["Meets 90% Rule"] = out["Payout Ratio %"] >= 90.0
-
-    out["CF Sum"] = out[cfo].fillna(0) + out[cfi].fillna(0) + out[cff].fillna(0) + out[pat].fillna(0)
-    out["Gap vs Computed"] = out["CF Sum"] - out[comp]
-    out["Gap % of Computed"] = np.where(out[comp] != 0, (out["Gap vs Computed"] / out[comp]) * 100.0, np.nan).round(2)
-    out["Within 10% Gap"] = out["Gap % of Computed"].abs() <= 10.0
-    return out
-
-def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
-    if not {"Declaration Date","Record Date","Distribution Date"}.issubset(df.columns):
-        return pd.DataFrame(columns=[
-            "Financial Year","Period Ended","Declaration Date","Record Date","Distribution Date",
-            "Days Decl→Record","Record ≤ 2 days","Days Record→Distr","Distribution ≤ 5 days"
-        ])
-    t = df.copy()
-    t["Days Decl→Record"] = (t["Record Date"] - t["Declaration Date"]).dt.days
-    t["Days Record→Distr"] = (t["Distribution Date"] - t["Record Date"]).dt.days
-    t["Record ≤ 2 days"] = (t["Days Decl→Record"] >= 0) & (t["Days Decl→Record"] <= 2)
-    t["Distribution ≤ 5 days"] = (t["Days Record→Distr"] >= 0) & (t["Days Record→Distr"] <= 5)
-    return t[[
-        "Financial Year","Period Ended","Declaration Date","Record Date","Distribution Date",
-        "Days Decl→Record","Record ≤ 2 days","Days Record→Distr","Distribution ≤ 5 days"
-    ]].copy()
-
-# ---------- SPV-level ----------
 def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFrame:
     csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
     df = pd.read_csv(csv_url, dtype=str, keep_default_na=False)
@@ -198,19 +157,7 @@ def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFra
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    needed_nums = [
-        "Total Amount of NDCF computed as per NDCF Statement",
-        "Total Amount of NDCF declared for the period (incl. Surplus)",
-        "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "SPV Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)",
-        "HoldCo Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "HoldCo Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "Holdco Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "Holdco Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)",
-    ]
-    for c in needed_nums:
+    for c in [COMP_COL, DECL_INCL_COL, SPV_CFO, SPV_CFI, SPV_CFF, SPV_PAT, HCO_CFO, HCO_CFI, HCO_CFF, HCO_PAT]:
         if c in df.columns:
             df[c] = df[c].map(_to_number)
 
@@ -220,34 +167,6 @@ def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFra
 
     return df
 
-def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
-    comp = "Total Amount of NDCF computed as per NDCF Statement"
-    decl = "Total Amount of NDCF declared for the period (incl. Surplus)"
-
-    spv_cfo = "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
-    spv_cfi = "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
-    spv_cff = "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
-    spv_pat = "SPV Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
-
-    hco_cfo = "HoldCo Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
-    hco_cfi = "HoldCo Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
-    hco_cff = "Holdco Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
-    hco_pat = "Holdco Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
-
-    out = df.copy()
-    out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
-    out["Meets 90% Rule (SPV)"] = out["Payout Ratio %"] >= 90.0
-
-    out["SPV+HoldCo CF Sum"] = (
-        out[spv_cfo].fillna(0) + out[spv_cfi].fillna(0) + out[spv_cff].fillna(0) + out[spv_pat].fillna(0) +
-        out[hco_cfo].fillna(0) + out[hco_cfi].fillna(0) + out[hco_cff].fillna(0) + out[hco_pat].fillna(0)
-    )
-    out["Gap vs Computed (SPV)"] = out["SPV+HoldCo CF Sum"] - out[comp]
-    out["Gap % of Computed (SPV)"] = np.where(out[comp] != 0, (out["Gap vs Computed (SPV)"] / out[comp]) * 100.0, np.nan).round(2)
-    out["Within Computed Bound (SPV)"] = np.where(out[comp] > 0, out["Gap vs Computed (SPV)"].abs() < out[comp], np.nan)
-    return out
-
-# ---------- OD links ----------
 def load_offer_doc_links(dir_url: Optional[str]) -> pd.DataFrame:
     if not dir_url:
         return pd.DataFrame(columns=["Name of REIT","OD Link"])
@@ -261,7 +180,50 @@ def load_offer_doc_links(dir_url: Optional[str]) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["Name of REIT","OD Link"])
 
-# ---------- UI ----------
+# ------------------- computations -------------------
+def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["Payout Ratio %"] = np.where(out[COMP_COL] > 0, (out[DECL_INCL_COL] / out[COMP_COL]) * 100.0, np.nan).round(2)
+    out["Meets 90% Rule"] = out["Payout Ratio %"] >= 90.0
+
+    out["CF Sum"] = out[CFO_COL].fillna(0) + out[CFI_COL].fillna(0) + out[CFF_COL].fillna(0) + out[PAT_COL].fillna(0)
+    out["Gap vs Computed"] = out["CF Sum"] - out[COMP_COL]
+    out["Gap % of Computed"] = np.where(out[COMP_COL] != 0, (out["Gap vs Computed"] / out[COMP_COL]) * 100.0, np.nan).round(2)
+    out["Within 10% Gap"] = out["Gap % of Computed"].abs() <= 10.0
+    return out
+
+def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
+    needed = {"Declaration Date","Record Date","Distribution Date"}
+    if not needed.issubset(df.columns):
+        return pd.DataFrame(columns=[
+            "Financial Year","Period Ended","Declaration Date","Record Date","Distribution Date",
+            "Days Decl→Record","Record ≤ 2 days","Days Record→Distr","Distribution ≤ 5 days"
+        ])
+    t = df.copy()
+    t["Days Decl→Record"] = (t["Record Date"] - t["Declaration Date"]).dt.days
+    t["Days Record→Distr"] = (t["Distribution Date"] - t["Record Date"]).dt.days
+    t["Record ≤ 2 days"] = (t["Days Decl→Record"] >= 0) & (t["Days Decl→Record"] <= 2)
+    t["Distribution ≤ 5 days"] = (t["Days Record→Distr"] >= 0) & (t["Days Record→Distr"] <= 5)
+    return t[[
+        "Financial Year","Period Ended","Declaration Date","Record Date","Distribution Date",
+        "Days Decl→Record","Record ≤ 2 days","Days Record→Distr","Distribution ≤ 5 days"
+    ]].copy()
+
+def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["Payout Ratio %"] = np.where(out[COMP_COL] > 0, (out[DECL_INCL_COL] / out[COMP_COL]) * 100.0, np.nan).round(2)
+    out["Meets 90% Rule (SPV)"] = out["Payout Ratio %"] >= 90.0
+
+    out["SPV+HoldCo CF Sum"] = (
+        out[SPV_CFO].fillna(0) + out[SPV_CFI].fillna(0) + out[SPV_CFF].fillna(0) + out[SPV_PAT].fillna(0) +
+        out[HCO_CFO].fillna(0) + out[HCO_CFI].fillna(0) + out[HCO_CFF].fillna(0) + out[HCO_PAT].fillna(0)
+    )
+    out["Gap vs Computed (SPV)"] = out["SPV+HoldCo CF Sum"] - out[COMP_COL]
+    out["Gap % of Computed (SPV)"] = np.where(out[COMP_COL] != 0, (out["Gap vs Computed (SPV)"] / out[COMP_COL]) * 100.0, np.nan).round(2)
+    out["Within Computed Bound (SPV)"] = np.where(out[COMP_COL] > 0, out["Gap vs Computed (SPV)"].abs() < out[COMP_COL], np.nan)
+    return out
+
+# ------------------- UI -------------------
 def render():
     st.header("NDCF — Compliance Checks")
 
@@ -290,7 +252,7 @@ def render():
         key="ndcf_reit_select",
     )
 
-    # OD link
+    # Offer Document link (Sheet5 in directory workbook)
     if DEFAULT_REIT_DIR_URL:
         od_df = load_offer_doc_links(DEFAULT_REIT_DIR_URL)
         od = od_df.loc[od_df["Name of REIT"] == ent, "OD Link"]
@@ -317,19 +279,17 @@ def render():
             st.warning("No TRUST-level rows for the selected REIT and Financial Year.")
             return
 
-        # checks 1 & 2
         qc = compute_trust_checks(q)
         total = int(len(qc))
-        s1, s2, s3 = st.columns(3)
-        s1.metric("TRUST: periods meeting 90% payout", f"{int(qc['Meets 90% Rule'].astype('boolean').sum())}/{total}")
-        s2.metric("TRUST: periods within 10% gap", f"{int(qc['Within 10% Gap'].astype('boolean').sum())}/{total}")
-        s3.metric("TRUST: rows analysed", f"{total}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("TRUST: periods meeting 90% payout", f"{int(qc['Meets 90% Rule'].astype('boolean').sum())}/{total}")
+        c2.metric("TRUST: periods within 10% gap", f"{int(qc['Within 10% Gap'].astype('boolean').sum())}/{total}")
+        c3.metric("TRUST: rows analysed", f"{total}")
 
         st.subheader("Trust Check 1 — 90% payout of Computed NDCF")
         disp1 = qc[[
             "Financial Year","Period Ended",
-            "Total Amount of NDCF computed as per NDCF Statement",
-            "Total Amount of NDCF declared for the period (incl. Surplus)",
+            COMP_COL, DECL_INCL_COL,
             "Payout Ratio %","Meets 90% Rule",
         ]].copy()
         disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(_status)
@@ -340,23 +300,21 @@ def render():
         st.subheader("Trust Check 2 — (CFO + CFI + CFF + PAT) vs Computed NDCF")
         disp2 = qc[[
             "Financial Year","Period Ended",
-            "Cash Flow From operating Activities as per Audited/Reviewed",
-            "Cash Flow From Investing Activities as per Audited/Reviewed",
-            "Cash Flow From Fincing Activities as per Audited/Reviewed",
-            "Profit after tax as per Audited/Reviewed",
+            CFO_COL, CFI_COL, CFF_COL, PAT_COL,
+            "CF Sum", COMP_COL, "Gap vs Computed", "Gap % of Computed", "Within 10% Gap"
         ]].copy()
-        # rename for compact headers
-        disp2.columns = [
-            "Financial Year","Period Ended","CFO","CFI","CFF","PAT"
-        ]
-        disp2 = disp2.join(qc[["CF Sum","Total Amount of NDCF computed as per NDCF Statement","Gap vs Computed","Gap % of Computed","Within 10% Gap"]])
+        disp2 = disp2.rename(columns={
+            CFO_COL: "CFO", CFI_COL: "CFI", CFF_COL: "CFF", PAT_COL: "PAT",
+            COMP_COL: "Computed NDCF"
+        })
         disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(_status)
         st.dataframe(disp2, use_container_width=True, hide_index=True)
         if (~qc["Within 10% Gap"].astype("boolean").fillna(False)).any():
-            st.error("TRUST: One or more periods have a gap > 10%.")
+            st.error("TRUST: One or more periods have a gap > 10% between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
-        # timeline checks 3a / 3b
+        # timeline checks
         tline = compute_trust_timeline_checks(q)
+
         st.subheader("Trust Check 3a — Declaration → Record Date (≤ 2 days)")
         t1 = tline[[
             "Financial Year","Period Ended","Declaration Date","Record Date","Days Decl→Record","Record ≤ 2 days"
@@ -364,7 +322,7 @@ def render():
         t1["Record ≤ 2 days"] = t1["Record ≤ 2 days"].map(_status)
         st.dataframe(t1, use_container_width=True, hide_index=True)
         if (tline["Record ≤ 2 days"] == False).any():
-            st.error("TRUST: Record Date more than 2 days after Declaration.")
+            st.error("TRUST: One or more periods have Record Date more than 2 days after Declaration.")
 
         st.subheader("Trust Check 3b — Record Date → Distribution Date (≤ 5 days)")
         t2 = tline[[
@@ -373,14 +331,11 @@ def render():
         t2["Distribution ≤ 5 days"] = t2["Distribution ≤ 5 days"].map(_status)
         st.dataframe(t2, use_container_width=True, hide_index=True)
         if (tline["Distribution ≤ 5 days"] == False).any():
-            st.error("TRUST: Distribution Date more than 5 days after Record Date.")
+            st.error("TRUST: One or more periods have Distribution Date more than 5 days after Record Date.")
 
-        # show RAW strings so we can see what came from the sheet
+        # show RAW strings to debug issues from the sheet
         with st.expander("Show RAW date strings from sheet"):
-            cols = []
-            if "Declaration Date__raw" in q.columns: cols.append("Declaration Date__raw")
-            if "Record Date__raw" in q.columns: cols.append("Record Date__raw")
-            if "Distribution Date__raw" in q.columns: cols.append("Distribution Date__raw")
+            cols = [c for c in ["Declaration Date__raw","Record Date__raw","Distribution Date__raw"] if c in q.columns]
             st.dataframe(q[cols], use_container_width=True, hide_index=True)
 
     else:
@@ -397,10 +352,9 @@ def render():
         st.subheader("SPV Check 1 — Declared (incl. Surplus) ≥ 90% of Computed (by SPV/period)")
         d1 = qs[[
             "Name of SPV","Name of Holdco (Leave Blank if N/A)","Financial Year","Period Ended",
-            "Total Amount of NDCF computed as per NDCF Statement",
-            "Total Amount of NDCF declared for the period (incl. Surplus)",
-            "Payout Ratio %","Meets 90% Rule (SPV)"
+            COMP_COL, DECL_INCL_COL, "Payout Ratio %","Meets 90% Rule (SPV)"
         ]].copy()
+        d1 = d1.rename(columns={COMP_COL:"Computed NDCF", DECL_INCL_COL:"Declared (incl. Surplus)"})
         d1["Meets 90% Rule (SPV)"] = d1["Meets 90% Rule (SPV)"].map(_status)
         st.dataframe(d1, use_container_width=True, hide_index=True)
         if (~qs["Meets 90% Rule (SPV)"].astype("boolean").fillna(False)).any():
@@ -409,9 +363,9 @@ def render():
         st.subheader("SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed| < Computed")
         d2 = qs[[
             "Name of SPV","Name of Holdco (Leave Blank if N/A)","Financial Year","Period Ended",
-            "SPV+HoldCo CF Sum","Total Amount of NDCF computed as per NDCF Statement",
-            "Gap vs Computed (SPV)","Gap % of Computed (SPV)","Within Computed Bound (SPV)"
+            "SPV+HoldCo CF Sum", COMP_COL, "Gap vs Computed (SPV)","Gap % of Computed (SPV)","Within Computed Bound (SPV)"
         ]].copy()
+        d2 = d2.rename(columns={COMP_COL:"Computed NDCF"})
         d2["Within Computed Bound (SPV)"] = d2["Within Computed Bound (SPV)"].map(_status)
         st.dataframe(d2, use_container_width=True, hide_index=True)
         if (~qs["Within Computed Bound (SPV)"].astype("boolean").fillna(False)).any():
