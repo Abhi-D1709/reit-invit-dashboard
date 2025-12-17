@@ -1,450 +1,481 @@
 # tabs/ndcf.py
-from __future__ import annotations
-
-import re
-import datetime as dt
-from typing import Dict, Tuple, Optional
-import urllib.parse as _url
-
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+import re
+from typing import Optional
 
-# --------------------------------------------------------------------------------------
-# Constants (sheet names). Adjust only if your Google Sheet tabs change.
-# --------------------------------------------------------------------------------------
-TRUST_SHEET_NAME = "NDCF REITs"          # REIT trust-level sheet
-SPV_SHEET_NAME   = "NDCF SPV REIT"       # REIT SPV-level sheet
-BASIC_DIR_SHEET  = "Sheet5"              # in common.DEFAULT_REIT_DIR_URL (Name of REIT, OD Link)
+# ---- Config (overridden by utils.common if present) -------------------------
+DEFAULT_SHEET_URL_TRUST = "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
+TRUST_SHEET_NAME = "NDCF REITs"
+SPV_SHEET_NAME   = "NDCF SPV REIT"
 
-# Columns we expect (with several tolerant aliases / common misspellings)
-COL_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "Entity": (
-        "Entity", "Name of REIT", "REIT", "Trust"
-    ),
-    "FY": (
-        "Financial Year", "FY", "Fincial Year", "Finanical Year", "Fin Year"
-    ),
-    "Period": (
-        "Period Ended", "Quarter", "Period"
-    ),
-    "Decl": (
-        # seen spellings in sheets
-        "Date of Finalisation/Declaration of NDCF Statement by REIT",
-        "Date of Filisation/Declaration of NDCF Statement by REIT",
-        "Date of Finalisation of NDCF Statement by REIT",
-        "Declaration Date",
-    ),
-    "Record": (
-        "Record Date", "Record date",
-    ),
-    "Distr": (
-        "Date of Distribution of NDCF by REIT",
-        "Distribution Date",
-    ),
-    "Computed": (
-        "Total Amount of NDCF computed as per NDCF Statement",
-        "Total NDCF computed",
-        "Total Amount of NDCF computed"
-    ),
-    "DeclaredIncl": (
-        "Total Amount of NDCF declared for the period (incl. Surplus)",
-        "Total Amount of NDCF declared (incl. Surplus)",
-        "Total NDCF declared (incl. Surplus)",
-    ),
-    # CASH FLOWS — include many text variants from different sheets
-    "CFO": (
-        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financals with Limited Review)",
-        "CFO",
-    ),
-    "CFI": (
-        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "CFI",
-    ),
-    "CFF": (
-        "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
-        "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "CFF",
-    ),
-    "PAT": (
-        "Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)",
-        "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
-        "PAT",
-    ),
-}
+DEFAULT_REIT_DIR_URL = None  # Offer Document links live here (Sheet5)
 
-# --------------------------------------------------------------------------------------
-# Utilities
-# --------------------------------------------------------------------------------------
+try:
+    # Centralized constants (if present)
+    from utils.common import NDCF_REITS_SHEET_URL, DEFAULT_REIT_DIR_URL as _DIR_URL
+    if NDCF_REITS_SHEET_URL:
+        DEFAULT_SHEET_URL_TRUST = NDCF_REITS_SHEET_URL
+    if _DIR_URL:
+        DEFAULT_REIT_DIR_URL = _DIR_URL
+except Exception:
+    pass
 
-def _gsheet_csv_url(sheet_url: str, *, sheet_name: str) -> str:
-    """
-    Build a CSV-export URL using the 'gviz' endpoint so we can specify the sheet name.
-    """
-    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)/", sheet_url)
+# ---- Helpers ----------------------------------------------------------------
+def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[str] = None) -> str:
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
     if not m:
-        return sheet_url  # fallback; user might already paste a CSV endpoint
-    file_id = m.group(1)
-    return (
-        f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq"
-        f"?tqx=out:csv&sheet={_url.quote(sheet_name)}"
-    )
+        return url
+    sheet_id = m.group(1)
+    if gid:
+        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    if sheet:
+        from urllib.parse import quote
+        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(sheet)}"
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
-def _read_sheet_as_str(sheet_url: str, sheet_name: str) -> pd.DataFrame:
-    """
-    Always read as string first (prevents Pandas from guessing types).
-    """
-    url = _gsheet_csv_url(sheet_url, sheet_name=sheet_name)
-    # keep_default_na=False => don't auto-interpret "None", "NA" as NaN
-    df = pd.read_csv(url, dtype=str, keep_default_na=False, na_values=[])
-    # normalize empties to None for consistent downstream handling
-    return df.replace({"": None})
-
-def _normalize_header(h: Optional[str]) -> str:
-    if not h:
-        return ""
-    s = (h or "").replace("\xa0", " ")  # NBSP -> space
-    s = re.sub(r"\s+", " ", s).strip().lower()
-    return s
-
-def _tokenize(s: str) -> set[str]:
-    return set(re.split(r"[^a-z0-9]+", s))
-
-def _resolve_columns(df: pd.DataFrame, aliases: Dict[str, Tuple[str, ...]]) -> Dict[str, str]:
-    """
-    Find the best matching real column name in df for each logical key in COL_ALIASES.
-    Strategy:
-      1) exact normalized match
-      2) substring match (either way)
-      3) token Jaccard similarity >= 0.7
-    """
-    norm_cols = {c: _normalize_header(c) for c in df.columns}
-    resolved: Dict[str, str] = {}
-
-    # exact
-    for key, alts in aliases.items():
-        for alt in alts:
-            target = _normalize_header(alt)
-            for real, norm in norm_cols.items():
-                if norm == target:
-                    resolved[key] = real
-                    break
-            if key in resolved:
-                break
-
-    # substring
-    for key, alts in aliases.items():
-        if key in resolved:
-            continue
-        for alt in alts:
-            target = _normalize_header(alt)
-            for real, norm in norm_cols.items():
-                if target in norm or norm in target:
-                    resolved[key] = real
-                    break
-            if key in resolved:
-                break
-
-    # token similarity
-    for key, alts in aliases.items():
-        if key in resolved:
-            continue
-        best = None
-        best_score = 0.0
-        for alt in alts:
-            t = _tokenize(_normalize_header(alt))
-            for real, norm in norm_cols.items():
-                r = _tokenize(norm)
-                if not t or not r:
-                    continue
-                j = len(t & r) / max(1, len(t | r))
-                if j > best_score:
-                    best_score = j
-                    best = real
-        if best_score >= 0.70 and best:
-            resolved[key] = best
-
-    return resolved
-
-def _coerce_number(x) -> Optional[float]:
-    if x is None:
-        return None
-    s = str(x).strip().replace(",", "")
-    if s in ("", "-", "na", "n/a", "none", "null"):
-        return None
+def _to_number(x):
+    if pd.isna(x):
+        return np.nan
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        return float(x)
+    s = str(x).strip()
+    if s in {"", "-", "–", "—"}:
+        return np.nan
+    s = s.replace(",", "")
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
     try:
         return float(s)
-    except Exception:
-        return None
+    except ValueError:
+        return np.nan
 
-def parse_date_any(v) -> pd.Timestamp:
-    """
-    Robust date parser:
-      - trims whitespace / NBSP
-      - accepts dd/mm/yyyy, dd-mm-yyyy, yyyy-mm-dd, mm/dd/yyyy
-      - accepts Excel serials (integers / floats)
-      - returns NaT if cannot parse
-    """
-    if v is None:
-        return pd.NaT
-    if isinstance(v, (pd.Timestamp, dt.date, dt.datetime)):
-        return pd.to_datetime(v, errors="coerce")
+def _strip(s):
+    return str(s).strip() if pd.notna(s) else s
 
-    s = str(v).replace("\xa0", " ").strip()
-    if s == "" or s.lower() in {"na", "n/a", "none", "-", "null"}:
-        return pd.NaT
-
-    # Excel serial?
-    if re.fullmatch(r"\d{3,6}", s):  # e.g., 45122
-        try:
-            # Google Sheets/Excel CSV exports: 1899-12-30 origin
-            return pd.to_datetime(float(s), unit="D", origin="1899-12-30", utc=False)
-        except Exception:
-            pass
-
-    # Try Pandas (dayfirst first, then default)
-    ts = pd.to_datetime(s, dayfirst=True, errors="coerce")
-    if pd.isna(ts):
-        ts = pd.to_datetime(s, errors="coerce")
-    return ts
-
-def _pct(n: Optional[float], d: Optional[float]) -> Optional[float]:
-    if n is None or d is None or d == 0:
-        return None
-    return 100.0 * n / d
-
-def _good_bad_icon(ok: Optional[bool]) -> str:
-    if ok is None:
+def _status(v: Optional[bool]) -> str:
+    if pd.isna(v):
         return "—"
-    return "🟢" if ok else "🔴"
+    return "🟢" if bool(v) else "🔴"
 
-# --------------------------------------------------------------------------------------
-# Trust-level logic
-# --------------------------------------------------------------------------------------
+def _to_date(s) -> pd.Timestamp:
+    """Parse to Timestamp (date-only). Returns NaT if not parseable."""
+    if pd.isna(s):
+        return pd.NaT
+    try:
+        dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
+        if pd.isna(dt):
+            return pd.NaT
+        return pd.to_datetime(dt.date())
+    except Exception:
+        return pd.NaT
 
-def _prepare_trust(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, Dict[str, str]]:
-    cols = _resolve_columns(df_raw, COL_ALIASES)
+# ---- TRUST-LEVEL -------------------------------------------------------------
+def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame:
+    csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
+    df = pd.read_csv(csv_url)
+    df.columns = [c.strip() for c in df.columns]
 
-    # keep only columns we know about; tolerate missing ones
-    keep = [cols.get(k) for k in ("Entity", "FY", "Period", "Decl", "Record", "Distr",
-                                  "Computed", "DeclaredIncl", "CFO", "CFI", "CFF", "PAT")]
-    keep = [c for c in keep if c]
-    df = df_raw[keep].copy()
-
-    # Standardized column names
     rename_map = {
-        cols.get("Entity", ""): "Entity",
-        cols.get("FY", ""): "Financial Year",
-        cols.get("Period", ""): "Period Ended",
-        cols.get("Decl", ""): "Declaration Date (raw)",
-        cols.get("Record", ""): "Record Date (raw)",
-        cols.get("Distr", ""): "Distribution Date (raw)",
-        cols.get("Computed", ""): "Computed NDCF",
-        cols.get("DeclaredIncl", ""): "Declared NDCF (incl. Surplus)",
-        cols.get("CFO", ""): "CFO",
-        cols.get("CFI", ""): "CFI",
-        cols.get("CFF", ""): "CFF",
-        cols.get("PAT", ""): "PAT",
+        "Entity": "Name of REIT",
+        "Fincial Year": "Financial Year",
+        "Period": "Period Ended",
+        "Period ended": "Period Ended",
+        "Date of Finalisation/Declaration of NDCF Statement by REIT": "Declaration Date",
+        "Record Date": "Record Date",
+        "Date of Distribution of NDCF by REIT": "Distribution Date",
     }
-    df.rename(columns={k: v for k, v in rename_map.items() if k}, inplace=True)
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # numeric columns
-    for c in ("Computed NDCF", "Declared NDCF (incl. Surplus)", "CFO", "CFI", "CFF", "PAT"):
-        if c in df.columns:
-            df[c] = df[c].map(_coerce_number)
-
-    # parse dates from raw text columns (keep a copy of raw for diagnostics)
-    for col_raw, col_parsed in (
-        ("Declaration Date (raw)", "Declaration Date"),
-        ("Record Date (raw)", "Record Date"),
-        ("Distribution Date (raw)", "Distribution Date"),
-    ):
-        if col_raw in df.columns:
-            df[col_parsed] = df[col_raw].map(parse_date_any)
-        else:
-            df[col_parsed] = pd.NaT
-
-    # derived calculations
-    if {"Computed NDCF", "Declared NDCF (incl. Surplus)"}.issubset(df.columns):
-        df["Payout >= 90%"] = df.apply(
-            lambda r: (r["Declared NDCF (incl. Surplus)"] is not None and
-                       r["Computed NDCF"] not in (None, 0) and
-                       _pct(r["Declared NDCF (incl. Surplus)"], r["Computed NDCF"]) >= 90.0),
-            axis=1,
-        )
-        df["Payout Ratio %"] = df.apply(
-            lambda r: _pct(r["Declared NDCF (incl. Surplus)"], r["Computed NDCF"]),
-            axis=1,
-        )
-
-    if {"CFO", "CFI", "CFF", "PAT", "Computed NDCF"}.issubset(df.columns):
-        df["CFO+CFI+CFF+PAT"] = df[["CFO", "CFI", "CFF", "PAT"]].sum(axis=1, min_count=1)
-        df["Gap % of Computed"] = df.apply(
-            lambda r: None if r["Computed NDCF"] in (None, 0)
-            else abs(r["CFO+CFI+CFF+PAT"] - r["Computed NDCF"]) / abs(r["Computed NDCF"]) * 100.0,
-            axis=1,
-        )
-        df["Within 10% Gap"] = df["Gap % of Computed"].map(lambda x: (x is not None) and (x <= 10.0))
-
-    # timeline diffs
-    df["Days Decl→Record"] = (df["Record Date"] - df["Declaration Date"]).dt.days
-    df["Record ≤ 2 days"]   = df["Days Decl→Record"].map(lambda x: (x is not None) and (not pd.isna(x)) and (x <= 2))
-
-    df["Days Record→Distr"] = (df["Distribution Date"] - df["Record Date"]).dt.days
-    df["Distribution ≤ 5 days"] = df["Days Record→Distr"].map(lambda x: (x is not None) and (not pd.isna(x)) and (x <= 5))
-
-    return df, cols
-
-# --------------------------------------------------------------------------------------
-# SPV-level logic (kept available for extension)
-# --------------------------------------------------------------------------------------
-
-def _prepare_spv(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, Dict[str, str]]:
-    return df_raw.copy(), {}
-
-# --------------------------------------------------------------------------------------
-# UI
-# --------------------------------------------------------------------------------------
-
-def _offer_doc_link(entity: str) -> Optional[str]:
-    # Pull from BASIC DETAILS directory in common.DEFAULT_REIT_DIR_URL (Sheet5)
-    try:
-        from utils.common import DEFAULT_REIT_DIR_URL
-    except Exception:
+    def _find_col(cols, *tokens):
+        for c in cols:
+            cl = c.lower().replace("finalisation", "finalization")
+            if all(t in cl for t in tokens):
+                return c
         return None
-    try:
-        dir_df = _read_sheet_as_str(DEFAULT_REIT_DIR_URL, BASIC_DIR_SHEET)
-        # normalize headers
-        cols = {c.lower().strip(): c for c in dir_df.columns}
-        name_col = cols.get("name of reit") or cols.get("entity") or list(dir_df.columns)[0]
-        link_col = cols.get("od link (2 columns)") or cols.get("od link") or list(dir_df.columns)[-1]
-        m = dir_df[dir_df[name_col].fillna("").str.strip().str.casefold() == entity.strip().casefold()]
-        if not m.empty:
-            val = (m.iloc[0][link_col] or "").strip()
-            return val or None
-    except Exception:
-        return None
-    return None
 
+    if "Declaration Date" not in df.columns:
+        cand = _find_col(df.columns, "declar") or _find_col(df.columns, "finaliz", "ndcf")
+        if cand:
+            df = df.rename(columns={cand: "Declaration Date"})
+    if "Record Date" not in df.columns:
+        cand = _find_col(df.columns, "record", "date")
+        if cand:
+            df = df.rename(columns={cand: "Record Date"})
+    if "Distribution Date" not in df.columns:
+        cand = _find_col(df.columns, "distribution", "date")
+        if cand:
+            df = df.rename(columns={cand: "Distribution Date"})
+
+    needed = [
+        "Name of REIT",
+        "Financial Year",
+        "Period Ended",
+        "Total Amount of NDCF computed as per NDCF Statement",
+        "Total Amount of NDCF declared for the period (incl. Surplus)",
+        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+        "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+        "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
+    ]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        st.error("The NDCF (Trust) sheet is missing expected columns: " + ", ".join(missing))
+        with st.expander("Show detected columns (Trust)"):
+            st.write(list(df.columns))
+        return df.iloc[0:0]
+
+    for c in needed[3:]:
+        df[c] = df[c].map(_to_number)
+    for c in ["Name of REIT", "Financial Year", "Period Ended"]:
+        df[c] = df[c].astype(str).map(_strip)
+
+    if "Declaration Date" in df.columns:
+        df["Declaration Date"] = df["Declaration Date"].map(_to_date)
+    if "Record Date" in df.columns:
+        df["Record Date"] = df["Record Date"].map(_to_date)
+    if "Distribution Date" in df.columns:
+        df["Distribution Date"] = df["Distribution Date"].map(_to_date)
+
+    return df
+
+def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
+    comp = "Total Amount of NDCF computed as per NDCF Statement"
+    decl = "Total Amount of NDCF declared for the period (incl. Surplus)"
+    cfo = "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
+    cfi = "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
+    cff = "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
+    pat = "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)"
+
+    out = df.copy()
+    # Check 1: ≥ 90% payout
+    out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
+    out["Meets 90% Rule"] = out["Payout Ratio %"] >= 90.0
+
+    # Check 2: |(CFO+CFI+CFF+PAT − Computed)| ≤ 10% of Computed
+    out["CF Sum"] = out[cfo].fillna(0) + out[cfi].fillna(0) + out[cff].fillna(0) + out[pat].fillna(0)
+    out["Gap vs Computed"] = out["CF Sum"] - out[comp]
+    out["Gap % of Computed"] = np.where(out[comp] != 0, (out["Gap vs Computed"] / out[comp]) * 100.0, np.nan).round(2)
+    out["Within 10% Gap"] = out["Gap % of Computed"].abs() <= 10.0
+
+    return out
+
+def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Check the date gaps
+      - Declaration → Record Date <= 2 days
+      - Record Date → Distribution Date <= 5 days
+    """
+    if not {"Declaration Date", "Record Date", "Distribution Date"}.issubset(df.columns):
+        return pd.DataFrame(columns=[
+            "Financial Year", "Period Ended",
+            "Declaration Date", "Record Date", "Distribution Date",
+            "Days Decl→Record", "Record ≤ 2 days",
+            "Days Record→Distr", "Distribution ≤ 5 days"
+        ])
+
+    t = df.copy()
+    t["Days Decl→Record"] = (t["Record Date"] - t["Declaration Date"]).dt.days
+    t["Days Record→Distr"] = (t["Distribution Date"] - t["Record Date"]).dt.days
+
+    t["Record ≤ 2 days"] = (t["Days Decl→Record"] >= 0) & (t["Days Decl→Record"] <= 2)
+    t["Distribution ≤ 5 days"] = (t["Days Record→Distr"] >= 0) & (t["Days Record→Distr"] <= 5)
+
+    return t[[
+        "Financial Year", "Period Ended",
+        "Declaration Date", "Record Date", "Distribution Date",
+        "Days Decl→Record", "Record ≤ 2 days",
+        "Days Record→Distr", "Distribution ≤ 5 days"
+    ]].copy()
+
+# ---- SPV-LEVEL ---------------------------------------------------------------
+def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFrame:
+    csv_url = _csv_url_from_gsheet(url, sheet=sheet_name)
+    df = pd.read_csv(csv_url)
+    df.columns = [c.strip() for c in df.columns]
+
+    rename_map = {
+        "Entity": "Name of REIT",
+        "Fincial Year": "Financial Year",
+        "Period": "Period Ended",
+        "Period ended": "Period Ended",
+        "Name of Holdco": "Name of Holdco (Leave Blank if N/A)",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    needed = [
+        "Name of REIT",
+        "Name of SPV",
+        "Name of Holdco (Leave Blank if N/A)",
+        "Financial Year",
+        "Period Ended",
+        "Total Amount of NDCF computed as per NDCF Statement",
+        "Total Amount of NDCF declared for the period (incl. Surplus)",
+        "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "SPV Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)",
+        "HoldCo Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "HoldCo Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "Holdco Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)",
+        "Holdco Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)",
+    ]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        st.warning("The NDCF (SPV) sheet is missing expected columns: " + ", ".join(missing))
+        with st.expander("Show detected columns (SPV)"):
+            st.write(list(df.columns))
+        return df.iloc[0:0]
+
+    for c in needed[5:]:
+        df[c] = df[c].map(_to_number)
+    for c in ["Name of REIT", "Financial Year", "Period Ended", "Name of SPV", "Name of Holdco (Leave Blank if N/A)"]:
+        df[c] = df[c].astype(str).map(_strip)
+    return df
+
+def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
+    comp = "Total Amount of NDCF computed as per NDCF Statement"
+    decl = "Total Amount of NDCF declared for the period (incl. Surplus)"
+
+    spv_cfo = "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    spv_cfi = "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    spv_cff = "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    spv_pat = "SPV Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
+
+    hco_cfo = "HoldCo Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    hco_cfi = "HoldCo Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    hco_cff = "Holdco Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+    hco_pat = "Holdco Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
+
+    out = df.copy()
+    out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
+    out["Meets 90% Rule (SPV)"] = out["Payout Ratio %"] >= 90.0
+
+    out["SPV+HoldCo CF Sum"] = (
+        out[spv_cfo].fillna(0) + out[spv_cfi].fillna(0) + out[spv_cff].fillna(0) + out[spv_pat].fillna(0) +
+        out[hco_cfo].fillna(0) + out[hco_cfi].fillna(0) + out[hco_cff].fillna(0) + out[hco_pat].fillna(0)
+    )
+    out["Gap vs Computed (SPV)"] = out["SPV+HoldCo CF Sum"] - out[comp]
+    out["Gap % of Computed (SPV)"] = np.where(out[comp] != 0, (out["Gap vs Computed (SPV)"] / out[comp]) * 100.0, np.nan).round(2)
+    out["Within Computed Bound (SPV)"] = np.where(out[comp] > 0, out["Gap vs Computed (SPV)"].abs() < out[comp], np.nan)
+    return out
+
+# ---- Offer Document (Sheet5 of Basic Details) --------------------------------
+def load_offer_doc_links(dir_url: Optional[str]) -> pd.DataFrame:
+    """
+    Loads 'Sheet5' of the Basic Details workbook and returns a map:
+      Name of REIT -> OD Link
+    """
+    if not dir_url:
+        return pd.DataFrame(columns=["Name of REIT", "OD Link"])
+    try:
+        csv_url = _csv_url_from_gsheet(dir_url, sheet="Sheet5")
+        df = pd.read_csv(csv_url)
+        df.columns = [c.strip() for c in df.columns]
+        ent_col = next((c for c in df.columns if "name" in c.lower() and "reit" in c.lower()), None)
+        link_col = next((c for c in df.columns if "od" in c.lower() and "link" in c.lower()), None)
+        if not ent_col:
+            ent_col = "Name of REIT" if "Name of REIT" in df.columns else df.columns[0]
+        if not link_col:
+            candidates = [c for c in df.columns if "link" in c.lower() or "http" in "".join(df[c].astype(str).tolist()).lower()]
+            link_col = candidates[0] if candidates else df.columns[-1]
+        return df[[ent_col, link_col]].rename(columns={ent_col: "Name of REIT", link_col: "OD Link"})
+    except Exception:
+        return pd.DataFrame(columns=["Name of REIT", "OD Link"])
+
+# ---- UI (flow: REIT -> Level -> FY) -----------------------------------------
 def render():
-    st.header("NDCF")
+    st.header("NDCF — Compliance Checks")
 
-    # Inputs
-    segment = st.selectbox("Select Segment", ["REIT", "InvIT"], index=0)
-    data_url = st.text_input(
-        "Data URL (Google Sheet - public view)",
-        value="https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing",
-        help="Paste the workbook URL. We will read the proper sheet by name.",
+    with st.sidebar:
+        seg = st.selectbox("Select Segment", ["REIT", "InvIT"], index=0)
+        data_url = st.text_input(
+            "Data URL (Google Sheet - public view)",
+            value=DEFAULT_SHEET_URL_TRUST,
+            help=f"Trust sheet: '{TRUST_SHEET_NAME}'. SPV sheet: '{SPV_SHEET_NAME}'.",
+        )
+
+    if seg != "REIT":
+        st.info("InvIT checks will be added later.")
+        return
+
+    # Load both sheets once
+    df_trust_all = load_reit_ndcf(data_url, TRUST_SHEET_NAME)
+    df_spv_all   = load_reit_spv_ndcf(data_url, SPV_SHEET_NAME)
+    if df_trust_all.empty:
+        return
+
+    # 1) Choose REIT first
+    ent = st.selectbox(
+        "Choose REIT",
+        sorted(df_trust_all["Name of REIT"].dropna().unique().tolist()),
+        index=0,
+        key="ndcf_reit_select",
     )
 
-    # Load trust-level REIT data as strings
-    trust_raw = _read_sheet_as_str(data_url, TRUST_SHEET_NAME)
-    trust_df, _cols_map = _prepare_trust(trust_raw)
+    # Offer Document link (from Basic Details / Sheet5)
+    if DEFAULT_REIT_DIR_URL:
+        od_df = load_offer_doc_links(DEFAULT_REIT_DIR_URL)
+        od_match = od_df.loc[od_df["Name of REIT"] == ent, "OD Link"]
+        if not od_match.empty and isinstance(od_match.iloc[0], str) and od_match.iloc[0].strip():
+            st.markdown(f"**Offer Document:** [{od_match.iloc[0].strip()}]({od_match.iloc[0].strip()})")
 
-    # Entity & FY selections (entity first, then FY)
-    entities = sorted([e for e in trust_df.get("Entity", pd.Series(dtype=str)).dropna().unique()])
-    entity = st.selectbox("Choose REIT", entities) if entities else None
+    # 2) Choose analysis level next (Trust vs SPV)
+    level = st.radio("Analysis level", ["Trust", "SPV/HoldCo"], horizontal=True, key="ndcf_level_select")
 
-    if entity:
-        od = _offer_doc_link(entity)
-        if od:
-            st.caption(f"Offer Document: {od}")
-
-        trust_entity = trust_df[trust_df["Entity"].fillna("").str.strip().str.casefold() == entity.strip().casefold()].copy()
-        years = sorted([fy for fy in trust_entity.get("Financial Year", pd.Series(dtype=str)).dropna().unique()])
-        fy = st.selectbox("Financial Year", years) if years else None
+    # 3) Choose FY (options depend on the chosen level)
+    if level == "Trust":
+        fy_options = sorted(df_trust_all.loc[df_trust_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist())
     else:
-        trust_entity, fy = pd.DataFrame(), None
+        fy_options = [] if df_spv_all.empty else sorted(
+            df_spv_all.loc[df_spv_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist()
+        )
 
-    if entity and fy:
-        q = trust_entity[trust_entity["Financial Year"] == fy].copy()
+    fy = st.selectbox(
+        "Financial Year",
+        ["— Select —"] + fy_options,
+        index=0,
+        key="ndcf_fy_select",
+        help="Pick a Financial Year to run the checks.",
+    )
+    if fy == "— Select —":
+        st.info("Pick a Financial Year to show results.")
+        return
 
-        # --------- Trust Check 1 (90% payout) ----------
-        st.subheader("Trust Check 1 — 90% payout of Computed NDCF")
-        if q.empty:
-            st.info("No rows for the selected REIT/FY.")
+    # ---------- TRUST-LEVEL (if selected) ----------
+    if level == "Trust":
+        q_trust = df_trust_all[(df_trust_all["Name of REIT"] == ent) & (df_trust_all["Financial Year"] == fy)].copy()
+        if q_trust.empty:
+            st.warning("No TRUST-level rows for the selected REIT and Financial Year.")
+            return
+
+        # Core checks (90% payout / 10% gap)
+        q_trust = compute_trust_checks(q_trust)
+
+        total = int(len(q_trust))
+        good_payout = int(q_trust["Meets 90% Rule"].astype("boolean").fillna(False).sum())
+        good_gap = int(q_trust["Within 10% Gap"].astype("boolean").fillna(False).sum())
+        s1, s2, s3 = st.columns(3)
+        s1.metric("TRUST: periods meeting 90% payout", f"{good_payout}/{total}")
+        s2.metric("TRUST: periods within 10% gap", f"{good_gap}/{total}")
+        s3.metric("TRUST: rows analysed", f"{total}")
+
+        st.subheader("Trust Check 1 — 90% payout of Computed NDCF (period-wise)")
+        disp1 = q_trust[[
+            "Financial Year",
+            "Period Ended",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Total Amount of NDCF declared for the period (incl. Surplus)",
+            "Payout Ratio %",
+            "Meets 90% Rule",
+        ]].copy()
+        disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(_status)
+        st.dataframe(disp1, use_container_width=True, hide_index=True)
+        if (~q_trust["Meets 90% Rule"].astype("boolean").fillna(False)).any():
+            st.error("TRUST: One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF).")
+
+        st.subheader("Trust Check 2 — (CFO + CFI + CFF + PAT) gap vs Computed NDCF (period-wise)")
+        disp2 = q_trust[[
+            "Financial Year",
+            "Period Ended",
+            "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+            "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+            "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+            "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
+            "CF Sum",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Gap vs Computed",
+            "Gap % of Computed",
+            "Within 10% Gap",
+        ]].copy()
+        disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(_status)
+        st.dataframe(disp2, use_container_width=True, hide_index=True)
+        if (~q_trust["Within 10% Gap"].astype("boolean").fillna(False)).any():
+            st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
+
+        # -------- NEW: timeline checks split into two separate tables --------
+        tline = compute_trust_timeline_checks(q_trust)
+        if tline.empty:
+            st.info("Declaration / Record / Distribution columns not found; timeline checks skipped.")
         else:
-            view = q[[c for c in (
-                "Financial Year", "Period Ended", "Computed NDCF", "Declared NDCF (incl. Surplus)",
-                "Payout Ratio %", "Payout >= 90%"
-            ) if c in q.columns]].copy()
-            if "Payout Ratio %" in view.columns:
-                view["Payout Ratio %"] = view["Payout Ratio %"].map(lambda x: None if x is None else round(x, 2))
-            if "Payout >= 90%" in view.columns:
-                view["Payout >= 90%"] = view["Payout >= 90%"].map(_good_bad_icon)
-            st.dataframe(view, use_container_width=True)
-            if "Payout >= 90%" in q.columns and (~q["Payout >= 90%"].fillna(False)).any():
-                st.error("TRUST: One or more periods are below 90% payout.")
-            else:
-                st.success("TRUST: All periods meet ≥ 90% payout.")
-
-        # --------- Trust Check 2 (CFO+CFI+CFF+PAT vs Computed within 10%) ----------
-        st.subheader("Trust Check 2 — (CFO + CFI + CFF + PAT) vs Computed NDCF")
-        if not q.empty:
-            cols2 = [c for c in (
-                "Financial Year", "Period Ended", "CFO", "CFI", "CFF", "PAT",
-                "CFO+CFI+CFF+PAT", "Computed NDCF", "Gap % of Computed", "Within 10% Gap"
-            ) if c in q.columns]
-            view2 = q[cols2].copy()
-            if "Gap % of Computed" in view2.columns:
-                view2["Gap % of Computed"] = view2["Gap % of Computed"].map(lambda x: None if x is None else round(x, 2))
-            if "Within 10% Gap" in view2.columns:
-                view2["Within 10% Gap"] = view2["Within 10% Gap"].map(_good_bad_icon)
-            st.dataframe(view2, use_container_width=True)
-            if "Within 10% Gap" in q.columns and (~q["Within 10% Gap"].fillna(False)).any():
-                st.error("TRUST: One or more periods have a gap > 10% between (CFO + CFI + CFF + PAT) and Computed NDCF.")
-            else:
-                st.success("TRUST: All periods are within the 10% gap threshold.")
-
-        # --------- Trust Check 3a (Declaration → Record ≤ 2 days) ----------
-        st.subheader("Trust Check 3a — Declaration → Record Date (≤ 2 days)")
-        if not q.empty:
-            cols3a = [c for c in (
+            # 3a) Declaration → Record Date (≤ 2 days)
+            st.subheader("Trust Check 3a — Declaration → Record Date (≤ 2 days)")
+            t1 = tline[[
                 "Financial Year", "Period Ended",
                 "Declaration Date", "Record Date",
                 "Days Decl→Record", "Record ≤ 2 days"
-            ) if c in q.columns]
-            view3a = q[cols3a].copy()
-            if "Record ≤ 2 days" in view3a.columns:
-                view3a["Record ≤ 2 days"] = view3a["Record ≤ 2 days"].map(_good_bad_icon)
-            st.dataframe(view3a, use_container_width=True)
+            ]].copy()
+            t1["Record ≤ 2 days"] = t1["Record ≤ 2 days"].map(_status)
+            st.dataframe(t1, use_container_width=True, hide_index=True)
 
-            # raw diagnostics (show strings as they appear in the sheet)
-            raw_cols = [c for c in q.columns if c.endswith("(raw)")]
-            if raw_cols:
-                with st.expander("Show raw date values (diagnostics)"):
-                    raw = q[raw_cols].copy()
-                    raw.rename(columns={
-                        "Declaration Date (raw)": "Declaration (raw)",
-                        "Record Date (raw)": "Record (raw)",
-                        "Distribution Date (raw)": "Distribution (raw)",
-                    }, inplace=True)
-                    st.dataframe(raw, use_container_width=True)
+            bad1 = (tline["Record ≤ 2 days"] == False)
+            if bad1.any():
+                st.error("TRUST: One or more periods have **Record Date more than 2 days after Declaration**.")
 
-            if "Record ≤ 2 days" in q.columns and (~q["Record ≤ 2 days"].fillna(False)).any():
-                st.error("TRUST: One or more periods have Record Date more than 2 days after Declaration.")
-            else:
-                st.success("TRUST: All periods meet ≤ 2 days from Declaration to Record Date.")
-
-        # --------- Trust Check 3b (Record → Distribution ≤ 5 days) ----------
-        st.subheader("Trust Check 3b — Record Date → Distribution Date (≤ 5 days)")
-        if not q.empty:
-            cols3b = [c for c in (
+            # 3b) Record Date → Distribution Date (≤ 5 days)
+            st.subheader("Trust Check 3b — Record Date → Distribution Date (≤ 5 days)")
+            t2 = tline[[
                 "Financial Year", "Period Ended",
                 "Record Date", "Distribution Date",
                 "Days Record→Distr", "Distribution ≤ 5 days"
-            ) if c in q.columns]
-            view3b = q[cols3b].copy()
-            if "Distribution ≤ 5 days" in view3b.columns:
-                view3b["Distribution ≤ 5 days"] = view3b["Distribution ≤ 5 days"].map(_good_bad_icon)
-            st.dataframe(view3b, use_container_width=True)
+            ]].copy()
+            t2["Distribution ≤ 5 days"] = t2["Distribution ≤ 5 days"].map(_status)
+            st.dataframe(t2, use_container_width=True, hide_index=True)
 
-            if "Distribution ≤ 5 days" in q.columns and (~q["Distribution ≤ 5 days"].fillna(False)).any():
-                st.error("TRUST: One or more periods have Distribution Date more than 5 days after Record Date.")
-            else:
-                st.success("TRUST: All periods meet ≤ 5 days from Record Date to Distribution Date.")
+            bad2 = (tline["Distribution ≤ 5 days"] == False)
+            if bad2.any():
+                st.error("TRUST: One or more periods have **Distribution Date more than 5 days after Record Date**.")
+
+    # ---------- SPV-LEVEL (if selected) ----------
     else:
-        st.info("Select a REIT and a Financial Year to view checks.")
+        if df_spv_all.empty:
+            st.info("SPV sheet could not be loaded or columns are missing; skipping SPV checks.")
+            return
+
+        q_spv = df_spv_all[(df_spv_all["Name of REIT"] == ent) & (df_spv_all["Financial Year"] == fy)].copy()
+        if q_spv.empty:
+            st.warning("No SPV-level rows for the selected REIT and Financial Year.")
+            return
+
+        q_spv = compute_spv_checks(q_spv)
+
+        st.subheader("SPV Check 1 — Declared (incl. Surplus) ≥ 90% of Computed NDCF (by SPV/period)")
+        disp_s1 = q_spv[[
+            "Name of SPV",
+            "Name of Holdco (Leave Blank if N/A)",
+            "Financial Year",
+            "Period Ended",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Total Amount of NDCF declared for the period (incl. Surplus)",
+            "Payout Ratio %",
+            "Meets 90% Rule (SPV)",
+        ]].copy()
+        disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(_status)
+        st.dataframe(disp_s1, use_container_width=True, hide_index=True)
+        if (~q_spv["Meets 90% Rule (SPV)"].astype("boolean").fillna(False)).any():
+            st.error("SPV: One or more SPV periods do **not** meet the 90% payout requirement.")
+
+        st.subheader("SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed NDCF| < Computed NDCF")
+        disp_s2 = q_spv[[
+            "Name of SPV",
+            "Name of Holdco (Leave Blank if N/A)",
+            "Financial Year",
+            "Period Ended",
+            "SPV+HoldCo CF Sum",
+            "Total Amount of NDCF computed as per NDCF Statement",
+            "Gap vs Computed (SPV)",
+            "Gap % of Computed (SPV)",
+            "Within Computed Bound (SPV)",
+        ]].copy()
+        disp_s2["Within Computed Bound (SPV)"] = disp_s2["Within Computed Bound (SPV)"].map(_status)
+        st.dataframe(disp_s2, use_container_width=True, hide_index=True)
+        if (~q_spv["Within Computed Bound (SPV)"].astype("boolean").fillna(False)).any():
+            st.error("SPV: One or more SPV periods have |Gap| ≥ Computed NDCF.")
+
+# Exported entrypoint for pages/5_NDCF.py
+def render_ndcf():
+    render()
+
+if __name__ == "__main__":
+    render()
