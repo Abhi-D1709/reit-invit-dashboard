@@ -103,7 +103,8 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
         st.error(f"Failed to load CSV: {e}")
         return pd.DataFrame()
         
-    df.columns = [c.strip() for c in df.columns]
+    # FIX: Replace newlines (\n) with spaces to handle wrapped headers
+    df.columns = [c.strip().replace("\n", " ").replace("  ", " ") for c in df.columns]
 
     rename_map = {
         "Entity": "Name of REIT",
@@ -117,7 +118,7 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # Save raw for debugging
+    # Save raw for debugging and parse
     for col in ["Declaration Date", "Record Date", "Distribution Date"]:
         if col in df.columns:
             df[f"{col}__raw"] = df[col]
@@ -144,7 +145,8 @@ def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFra
     except Exception as e:
         return pd.DataFrame()
         
-    df.columns = [c.strip() for c in df.columns]
+    # FIX: Clean headers here too
+    df.columns = [c.strip().replace("\n", " ").replace("  ", " ") for c in df.columns]
 
     rename_map = {
         "Entity": "Name of REIT",
