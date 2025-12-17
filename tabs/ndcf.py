@@ -79,7 +79,7 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
 
     rename_map = {
         "Entity": "Name of REIT",
-        "Fincial Year": "Financial Year",
+        "Financial Year": "Financial Year",
         "Period": "Period Ended",
         "Period ended": "Period Ended",
         "Date of Finalisation/Declaration of NDCF Statement by REIT": "Declaration Date",
@@ -114,10 +114,10 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
         "Period Ended",
         "Total Amount of NDCF computed as per NDCF Statement",
         "Total Amount of NDCF declared for the period (incl. Surplus)",
-        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
+        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
+        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
+        "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
+        "Profit after tax as per Statement of Profit and Loss (as per Audited Financials with Limited Review)",
     ]
     missing = [c for c in needed if c not in df.columns]
     if missing:
@@ -143,10 +143,10 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
 def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
     comp = "Total Amount of NDCF computed as per NDCF Statement"
     decl = "Total Amount of NDCF declared for the period (incl. Surplus)"
-    cfo = "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
-    cfi = "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
-    cff = "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)"
-    pat = "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)"
+    cfo = "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)"
+    cfi = "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)"
+    cff = "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)"
+    pat = "Profit after tax as per Statement of Profit and Loss (as per Audited Financials with Limited Review)"
 
     out = df.copy()
     # Check 1: ≥ 90% payout
@@ -197,7 +197,7 @@ def load_reit_spv_ndcf(url: str, sheet_name: str = SPV_SHEET_NAME) -> pd.DataFra
 
     rename_map = {
         "Entity": "Name of REIT",
-        "Fincial Year": "Financial Year",
+        "Financial Year": "Financial Year",
         "Period": "Period Ended",
         "Period ended": "Period Ended",
         "Name of Holdco": "Name of Holdco (Leave Blank if N/A)",
@@ -379,10 +379,10 @@ def render():
         disp2 = q_trust[[
             "Financial Year",
             "Period Ended",
-            "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-            "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-            "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-            "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
+            "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
+            "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
+            "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
+            "Profit after tax as per Statement of Profit and Loss (as per Audited Financials with Limited Review)",
             "CF Sum",
             "Total Amount of NDCF computed as per NDCF Statement",
             "Gap vs Computed",
