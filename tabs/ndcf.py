@@ -24,7 +24,7 @@ COL_ALIASES: Dict[str, Tuple[str, ...]] = {
         "Entity", "Name of REIT", "REIT", "Trust"
     ),
     "FY": (
-        "Financial Year", "Fincial Year", "FY"
+        "Financial Year", "Financial Year", "FY"
     ),
     "Period": (
         "Period Ended", "Quarter", "Period"
@@ -51,20 +51,21 @@ COL_ALIASES: Dict[str, Tuple[str, ...]] = {
         "Total Amount of NDCF declared (incl. Surplus)",
     ),
     "CFO": (
-        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+        "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financals with Limited Review)",
         "CFO",
     ),
     "CFI": (
-        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+        "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
         "CFI",
     ),
     "CFF": (
-        "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
-        "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Fincials or Fincials with Limited Review)",
+        "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials with Limited Review)",
+        "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited "
+        "s or Financials with Limited Review)",
         "CFF",
     ),
     "PAT": (
-        "Profit after tax as per Statement of Profit and Loss (as per Audited Fincials or Fincials with Limited Review)",
+        "Profit after tax as per Statement of Profit and Loss (as per Audited Financials with Limited Review)",
         "PAT",
     ),
 }
