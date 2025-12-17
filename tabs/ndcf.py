@@ -20,20 +20,19 @@ try:
 except ImportError:
     pass
 
-# --- CONSTANTS (Updated "Fincials" -> "Financials") ---
+# --- CONSTANTS (Updated to Standard "Financials" and "Financing") ---
 
 # 1. TRUST LEVEL
 COMP_COL = "Total Amount of NDCF computed as per NDCF Statement"
 DECL_INCL_COL = "Total Amount of NDCF declared for the period (incl. Surplus)"
 
-# Note: "Fincials" updated to "Financials" below.
-# "Fincing" is kept as it was in the original file. If you fixed that too, change "Fincing" to "Financing" below.
+# UPDATED: Assumes "Fincing" was also corrected to "Financing" in your sheet
 CFO_COL = "Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
 CFI_COL = "Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
-CFF_COL = "Cash Flow From Fincing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
+CFF_COL = "Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
 PAT_COL = "Profit after tax as per Statement of Profit and Loss (as per Audited Financials or Financials with Limited Review)"
 
-# 2. SPV LEVEL (Already correct in original, but included for completeness)
+# 2. SPV LEVEL
 SPV_CFO = "SPV Cash Flow From operating Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
 SPV_CFI = "SPV Cash Flow From Investing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
 SPV_CFF = "SPV Cash Flow From Financing Activities as per Cash Flow Statements (as per Audited Financials or Financials with Limited Review)"
@@ -50,7 +49,6 @@ def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[st
         return url
     sheet_id = m.group(1)
     
-    # Prioritize GID export if available (more reliable)
     if not gid:
         m_gid = re.search(r"[?&]gid=(\d+)", url)
         if m_gid:
@@ -68,20 +66,14 @@ def _csv_url_from_gsheet(url: str, sheet: Optional[str] = None, gid: Optional[st
 def _clean_numeric_col(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip().str.replace(",", "")
     s = s.replace({"-": np.nan, "–": np.nan, "—": np.nan, "": np.nan, "None": np.nan, "nan": np.nan})
-    # Handle negative numbers in parentheses e.g. (1000)
     mask_parens = s.str.match(r"^\(.*\)$", na=False)
     s.loc[mask_parens] = "-" + s.loc[mask_parens].str[1:-1]
     return pd.to_numeric(s, errors='coerce')
 
 def _parse_mixed_dates(series: pd.Series) -> pd.Series:
-    """Handles mixture of DD/MM/YYYY and YYYY-MM-DD found in your file."""
     s_str = series.astype(str).str.strip()
     s_str = s_str.replace({"None": np.nan, "nan": np.nan, "": np.nan})
-    
-    # 1. Try generic parser (handles YYYY-MM-DD and DD/MM/YYYY usually)
     dates = pd.to_datetime(s_str, dayfirst=True, errors='coerce')
-    
-    # 2. If NaT found, try Excel serial numbers
     mask_nat = dates.isna() & s_str.notna()
     if mask_nat.any():
         numeric_part = pd.to_numeric(s_str[mask_nat], errors='coerce')
@@ -89,7 +81,6 @@ def _parse_mixed_dates(series: pd.Series) -> pd.Series:
         if not valid_serials.empty:
             dates_serial = pd.to_datetime(valid_serials, unit='D', origin='1899-12-30')
             dates.update(dates_serial)
-            
     return dates
 
 def _status(v) -> str:
@@ -107,7 +98,7 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
     except Exception:
         return pd.DataFrame()
         
-    # Robust header cleaning (removes newlines and extra spaces)
+    # Robust header cleaning
     df.columns = [re.sub(r'\s+', ' ', str(c)).strip() for c in df.columns]
 
     rename_map = {
@@ -121,18 +112,16 @@ def load_reit_ndcf(url: str, sheet_name: str = TRUST_SHEET_NAME) -> pd.DataFrame
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # Date parsing
     for col in ["Declaration Date", "Record Date", "Distribution Date"]:
         if col in df.columns:
             df[f"{col}__raw"] = df[col]
             df[col] = _parse_mixed_dates(df[col])
 
-    # Numeric conversion
+    # Try to clean numeric columns if they exist
     for c in [COMP_COL, DECL_INCL_COL, CFO_COL, CFI_COL, CFF_COL, PAT_COL]:
         if c in df.columns:
             df[c] = _clean_numeric_col(df[c])
 
-    # String cleanup
     for c in ["Name of REIT", "Financial Year", "Period Ended"]:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
@@ -194,6 +183,18 @@ def load_offer_doc_links(dir_url: Optional[str]) -> pd.DataFrame:
 # ------------------- computations -------------------
 def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    
+    # SAFETY: Check if columns exist before calculation
+    missing_cols = []
+    for col in [CFO_COL, CFI_COL, CFF_COL, PAT_COL]:
+        if col not in out.columns:
+            missing_cols.append(col)
+    
+    if missing_cols:
+        st.error(f"❌ Missing Columns in Data: {missing_cols}")
+        st.write("Please check your Google Sheet headers exactly match what the code expects.")
+        return pd.DataFrame() # Return empty to prevent crash
+
     out["Payout Ratio %"] = np.nan
     mask_nonzero = out[COMP_COL] != 0
     out.loc[mask_nonzero, "Payout Ratio %"] = (out.loc[mask_nonzero, DECL_INCL_COL] / out.loc[mask_nonzero, COMP_COL]) * 100.0
@@ -305,57 +306,58 @@ def render():
             st.warning("No data for this selection.")
         else:
             qc = compute_trust_checks(q)
-            c1, c2, c3 = st.columns(3)
-            fails_90 = (~qc["Meets 90% Rule"].astype("boolean").fillna(False)).sum()
-            fails_gap = (~qc["Within 10% Gap"].astype("boolean").fillna(False)).sum()
-            c1.metric("90% Rule Failures", f"{fails_90}", delta_color="inverse")
-            c2.metric("Gap Check Failures", f"{fails_gap}", delta_color="inverse")
-            c3.metric("Records Analyzed", f"{len(qc)}")
-            st.divider()
+            if not qc.empty:
+                c1, c2, c3 = st.columns(3)
+                fails_90 = (~qc["Meets 90% Rule"].astype("boolean").fillna(False)).sum()
+                fails_gap = (~qc["Within 10% Gap"].astype("boolean").fillna(False)).sum()
+                c1.metric("90% Rule Failures", f"{fails_90}", delta_color="inverse")
+                c2.metric("Gap Check Failures", f"{fails_gap}", delta_color="inverse")
+                c3.metric("Records Analyzed", f"{len(qc)}")
+                st.divider()
 
-            st.subheader("1. 90% Payout Rule")
-            disp1 = qc[[
-                "Financial Year","Period Ended",
-                COMP_COL, DECL_INCL_COL,
-                "Payout Ratio %","Meets 90% Rule",
-            ]].copy()
-            disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(_status)
-            st.dataframe(disp1, use_container_width=True, hide_index=True)
-
-            st.subheader("2. Cash Flow Reconciliation")
-            disp2 = qc[[
-                "Period Ended", "CF Sum", COMP_COL, "Gap vs Computed", "Gap % of Computed", "Within 10% Gap"
-            ]].copy()
-            disp2 = disp2.rename(columns={COMP_COL: "Computed NDCF"})
-            disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(_status)
-            st.dataframe(disp2, use_container_width=True, hide_index=True)
-
-            st.subheader("3. Timeline Compliance")
-            tline = compute_trust_timeline_checks(q)
-            if not tline.empty:
-                t1 = tline[[
-                    "Period Ended","Declaration Date","Record Date","Days Decl→Record","Record ≤ 2 days"
+                st.subheader("1. 90% Payout Rule")
+                disp1 = qc[[
+                    "Financial Year","Period Ended",
+                    COMP_COL, DECL_INCL_COL,
+                    "Payout Ratio %","Meets 90% Rule",
                 ]].copy()
-                t1["Record ≤ 2 days"] = t1["Record ≤ 2 days"].map(_status)
-                
-                t2 = tline[[
-                    "Period Ended","Record Date","Distribution Date","Days Record→Distr","Distribution ≤ 5 days"
+                disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(_status)
+                st.dataframe(disp1, use_container_width=True, hide_index=True)
+
+                st.subheader("2. Cash Flow Reconciliation")
+                disp2 = qc[[
+                    "Period Ended", "CF Sum", COMP_COL, "Gap vs Computed", "Gap % of Computed", "Within 10% Gap"
                 ]].copy()
-                t2["Distribution ≤ 5 days"] = t2["Distribution ≤ 5 days"].map(_status)
+                disp2 = disp2.rename(columns={COMP_COL: "Computed NDCF"})
+                disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(_status)
+                st.dataframe(disp2, use_container_width=True, hide_index=True)
 
-                col_t1, col_t2 = st.columns(2)
-                with col_t1:
-                    st.write("**Decl → Record (≤2 days)**")
-                    st.dataframe(t1, use_container_width=True, hide_index=True)
-                with col_t2:
-                    st.write("**Record → Distr (≤5 days)**")
-                    st.dataframe(t2, use_container_width=True, hide_index=True)
-            else:
-                st.warning("Date columns missing (check Debug section).")
+                st.subheader("3. Timeline Compliance")
+                tline = compute_trust_timeline_checks(q)
+                if not tline.empty:
+                    t1 = tline[[
+                        "Period Ended","Declaration Date","Record Date","Days Decl→Record","Record ≤ 2 days"
+                    ]].copy()
+                    t1["Record ≤ 2 days"] = t1["Record ≤ 2 days"].map(_status)
+                    
+                    t2 = tline[[
+                        "Period Ended","Record Date","Distribution Date","Days Record→Distr","Distribution ≤ 5 days"
+                    ]].copy()
+                    t2["Distribution ≤ 5 days"] = t2["Distribution ≤ 5 days"].map(_status)
 
-            with st.expander("Debug: Raw Date Strings"):
-                cols = [c for c in ["Declaration Date__raw","Record Date__raw","Distribution Date__raw"] if c in q.columns]
-                st.dataframe(q[cols], use_container_width=True, hide_index=True)
+                    col_t1, col_t2 = st.columns(2)
+                    with col_t1:
+                        st.write("**Decl → Record (≤2 days)**")
+                        st.dataframe(t1, use_container_width=True, hide_index=True)
+                    with col_t2:
+                        st.write("**Record → Distr (≤5 days)**")
+                        st.dataframe(t2, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Date columns missing (check Debug section).")
+
+                with st.expander("Debug: Raw Date Strings"):
+                    cols = [c for c in ["Declaration Date__raw","Record Date__raw","Distribution Date__raw"] if c in q.columns]
+                    st.dataframe(q[cols], use_container_width=True, hide_index=True)
 
     with tab_spv:
         if df_spv_all.empty:
