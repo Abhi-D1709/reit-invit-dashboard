@@ -34,6 +34,9 @@ NDCF_INVITS_SHEET_URL = "" #to be added when available
 # Sponsor Holding (InvIT) – set this when your InvIT sheet is ready
 DEFAULT_INVIT_SPON_URL = ""
 
+#Governance Data (REITs) – Public view link
+GOVERNANCE_REIT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ETx5UZKQQyZKxkF4fFJ4R9wa7i7TNp7EXIhHWiVYG7s/edit?usp=sharing"
+
 # Canonical internal names
 ENT_COL = "__Entity__"
 FY_COL  = "__FinancialYear__"
