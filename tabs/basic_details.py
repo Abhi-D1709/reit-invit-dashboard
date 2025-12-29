@@ -187,15 +187,22 @@ def _map_sheet2(df: pd.DataFrame) -> Dict[str, List[str]]:
 def render():
     st.header("Basic Details")
 
-    seg = st.selectbox("Segment", ["REIT", "InvIT"], index=0)
-    default_url = DEFAULT_REIT_DIR_URL if seg == "REIT" else DEFAULT_INVIT_DIR_URL
-    url = st.text_input(
-        "Data URL (Google Sheet - public view)",
-        value=default_url or "",
-        placeholder="Paste a public Google Sheet URL…",
-        help="Same file should contain: Sheet1 (directory) and Sheet2 (FY-wise SPV/HoldCo).",
-        key=f"dir_url_{seg}",
-    )
+    with st.sidebar:
+        st.markdown("### Basic Details — Controls")
+        seg = st.selectbox(
+            "Segment",
+            ["REIT", "InvIT"],
+            index=0,
+            key="bd_segment"
+        )
+        default_url = DEFAULT_REIT_DIR_URL if seg == "REIT" else DEFAULT_INVIT_DIR_URL
+        url = st.text_input(
+            "Data URL (Google Sheet - public view)",
+            value=default_url or "",
+            placeholder="Paste a public Google Sheet URL…",
+            help="Same file should contain: Sheet1 (directory) and Sheet2 (FY-wise SPV/HoldCo).",
+            key=f"bd_url_{seg}"
+        )
 
     if not url.strip():
         st.info("Paste a public sheet URL to begin.")
