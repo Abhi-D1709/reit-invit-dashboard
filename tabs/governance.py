@@ -55,6 +55,15 @@ def _is_independent(type_cell: str) -> bool:
     return s.startswith("independent")
 
 
+def _is_director(type_cell: str) -> bool:
+    """
+    Checks if the member is explicitly identified as a Director.
+    Looks for the substring 'director' in the type description.
+    """
+    s = _clean_str(type_cell).lower()
+    return "director" in s
+
+
 def _is_non_exec(role_cell: str) -> bool:
     s = _clean_str(role_cell).lower().replace("-", " ")
     s = re.sub(r"\s+", " ", s)
@@ -97,6 +106,9 @@ def evaluate_audit(df: pd.DataFrame) -> pd.DataFrame:
         return _empty_table("No rows for this committee/period.")
 
     members = len(df)
+    # Count only those who are actually directors
+    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
+    
     indep = df["Type of Members of Committee"].apply(_is_independent).sum()
     indep_ratio_ok = indep * 3 >= members * 2  # indep/members >= 2/3
     has_fin_exp = df["Is this member identified as having accounting or related Financial Management Expertise."].apply(_as_bool).any()
@@ -111,7 +123,7 @@ def evaluate_audit(df: pd.DataFrame) -> pd.DataFrame:
         chair_detail = f"Chair type: {chair_types}"
 
     rows = [
-        ("Min 3 directors", members >= 3, f"Members: {members}"),
+        ("Min 3 directors", director_count >= 3, f"Directors: {director_count} (Total Members: {members})"),
         ("≥ 2/3 independent", bool(indep_ratio_ok), f"Independent: {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
         ("≥ 1 member has financial expertise", bool(has_fin_exp), "Yes" if has_fin_exp else "No"),
         ("Chairperson is independent", bool(chair_indep), chair_detail),
@@ -131,7 +143,16 @@ def evaluate_nrc(df: pd.DataFrame) -> pd.DataFrame:
         return _empty_table("No rows for this committee/period.")
 
     members = len(df)
-    all_non_exec = df["Role of Members of Committee"].apply(_is_non_exec).all()
+    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
+    
+    # Filter for directors to check if all DIRECTORS are non-executive
+    # (assuming the rule applies specifically to directors, though usually all NRC members are non-exec)
+    directors_only = df[df["Type of Members of Committee"].apply(_is_director)]
+    if directors_only.empty:
+        all_non_exec = False # No directors to check
+    else:
+        all_non_exec = directors_only["Role of Members of Committee"].apply(_is_non_exec).all()
+
     indep = df["Type of Members of Committee"].apply(_is_independent).sum()
     indep_ratio_ok = indep * 3 >= members * 2
 
@@ -145,8 +166,8 @@ def evaluate_nrc(df: pd.DataFrame) -> pd.DataFrame:
         chair_detail = f"Chair type: {chair_types}"
 
     rows = [
-        ("Min 3 directors", members >= 3, f"Members: {members}"),
-        ("All non-executive", bool(all_non_exec), "All non-executive" if all_non_exec else "Found executive member(s)"),
+        ("Min 3 directors", director_count >= 3, f"Directors: {director_count}"),
+        ("All directors non-executive", bool(all_non_exec), "Yes" if all_non_exec else "Found executive director(s)"),
         ("≥ 2/3 independent", bool(indep_ratio_ok), f"Independent: {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
         ("Chairperson is independent", bool(chair_indep), chair_detail),
     ]
@@ -164,6 +185,7 @@ def evaluate_src(df: pd.DataFrame) -> pd.DataFrame:
         return _empty_table("No rows for this committee/period.")
 
     members = len(df)
+    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
     indep = df["Type of Members of Committee"].apply(_is_independent).sum()
 
     chair_rows = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
@@ -177,7 +199,7 @@ def evaluate_src(df: pd.DataFrame) -> pd.DataFrame:
 
     rows = [
         ("Chairperson is non-executive", bool(chair_non_exec), chair_detail),
-        ("Min 3 directors", members >= 3, f"Members: {members}"),
+        ("Min 3 directors", director_count >= 3, f"Directors: {director_count}"),
         ("≥ 1 independent", indep >= 1, f"Independent: {indep}/{members}"),
     ]
     return _to_table(rows)
@@ -193,10 +215,11 @@ def evaluate_rmc(df: pd.DataFrame) -> pd.DataFrame:
         return _empty_table("No rows for this committee/period.")
 
     members = len(df)
+    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
     indep = df["Type of Members of Committee"].apply(_is_independent).sum()
 
     rows = [
-        ("Min 3 directors", members >= 3, f"Members: {members}"),
+        ("Min 3 directors", director_count >= 3, f"Directors: {director_count}"),
         ("≥ 1 independent", indep >= 1, f"Independent: {indep}/{members}"),
     ]
     return _to_table(rows)
