@@ -495,7 +495,7 @@ def render():
         if tline.empty:
             st.info("Declaration / Record / Distribution columns not found; timeline checks skipped.")
         else:
-            st.subheader("Trust Check 3a — Declaration → Record Date (≤ 2 days)")
+            st.subheader("Trust Check 3 — Declaration → Record Date (≤ 2 days)")
             t1 = tline[
                 ["Financial Year", "Period Ended", "Declaration Date", "Record Date", "Days Decl→Record", "Record ≤ 2 days"]
             ].copy()
@@ -504,7 +504,7 @@ def render():
             if (tline["Record ≤ 2 days"] == False).any():
                 st.error("TRUST: One or more periods have **Record Date more than 2 days after Declaration**.")
 
-            st.subheader("Trust Check 3b — Record Date → Distribution Date (≤ 5 days)")
+            st.subheader("Trust Check 4 — Record Date → Distribution Date (≤ 5 days)")
             t2 = tline[
                 ["Financial Year", "Period Ended", "Record Date", "Distribution Date", "Days Record→Distr", "Distribution ≤ 5 days"]
             ].copy()
