@@ -60,12 +60,13 @@ def _parse_date(x):
     return pd.to_datetime(x, dayfirst=True, errors='coerce')
 
 @st.cache_data(show_spinner=False)
-def read_google_sheet_excel(url: str, sheet_name: str) -> pd.DataFrame:
+def read_google_sheet_csv(url: str, gid: str) -> pd.DataFrame:
     """
-    Reads a specific sheet from a Google Sheet URL by exporting as XLSX.
-    Requires 'openpyxl' installed.
+    Reads a specific sheet from a Google Sheet URL by exporting as CSV.
+    This does NOT require openpyxl.
     """
     url = _clean_str(url)
+    # Construct base URL
     if "/edit" in url:
         base = url.split("/edit")[0]
     elif "/view" in url:
@@ -73,14 +74,14 @@ def read_google_sheet_excel(url: str, sheet_name: str) -> pd.DataFrame:
     else:
         base = url.rstrip("/")
     
-    # Export as XLSX to support multiple sheets by name
-    xlsx_url = f"{base}/export?format=xlsx"
+    # Export as CSV with specific GID
+    csv_url = f"{base}/export?format=csv&gid={gid}"
     
     try:
-        df = pd.read_excel(xlsx_url, sheet_name=sheet_name, dtype=str)
+        df = pd.read_csv(csv_url, dtype=str)
         return df.applymap(_clean_str)
     except Exception as e:
-        st.error(f"Error reading sheet '{sheet_name}'. Ensure the sheet exists and the URL is public. Details: {e}")
+        # Don't raise error, just return empty so UI handles it gracefully
         return pd.DataFrame()
 
 
@@ -215,7 +216,7 @@ def evaluate_meetings(committee_type: str, df_meet: pd.DataFrame, composition_co
     elif "Stakeholders" in committee_type:
         min_meetings = 1
         min_ids_present = 1
-        quorum_check = False # Prompt didn't strictly specify quorum for SRC, just "At least 1 ID present"
+        quorum_check = False
     elif "Risk" in committee_type:
         min_meetings = 2
         max_gap_days = 210
@@ -233,7 +234,6 @@ def evaluate_meetings(committee_type: str, df_meet: pd.DataFrame, composition_co
         max_actual_gap = max(gaps) if gaps else 0
         rows.append((f"Gap ≤ {max_gap_days} days", max_actual_gap <= max_gap_days, f"Max Gap: {max_actual_gap} days"))
     elif max_gap_days:
-        # Less than 2 meetings means gap check is N/A or technically pass if freq failed
         rows.append((f"Gap ≤ {max_gap_days} days", True, "N/A (< 2 meetings)"))
 
     # 3. Quorum Check (Min 2 or 1/3rd)
@@ -280,25 +280,35 @@ def _empty_table(message: str) -> pd.DataFrame:
 def render() -> None:
     st.title("Governance — Committee Checks")
 
-    st.info("Ensure the Google Sheet is visible to anyone with the link.")
-    url = st.sidebar.text_input(
-        "Data URL (Google Sheet)", value=DEFAULT_GOVERNANCE_URL
-    )
+    # Configuration Sidebar
+    with st.sidebar.expander("⚙️ Data Configuration", expanded=True):
+        url = st.text_input("Google Sheet URL", value=DEFAULT_GOVERNANCE_URL)
+        st.caption("Sheet 1 (Composition) is usually GID 0.")
+        gid1 = st.text_input("Sheet 1 GID (Composition)", value="0")
+        
+        st.caption("Sheet 2 (Meetings): Open sheet, look at URL for 'gid=...'")
+        gid2 = st.text_input("Sheet 2 GID (Meetings)", value="") 
 
-    # Load Data (Sheet 1 and Sheet 2)
-    # Using 'Sheet1' and 'Sheet2' explicitly as per prompt description
-    df_comp_raw = read_google_sheet_excel(url, "Sheet1")
-    df_meet_raw = read_google_sheet_excel(url, "Sheet2")
-
+    # Load Data (Using CSV loader to avoid openpyxl dependency)
+    df_comp_raw = read_google_sheet_csv(url, gid1)
+    
     if df_comp_raw.empty:
-        st.warning("Could not load 'Sheet1' (Composition).")
+        st.warning("Could not load Sheet 1 (Composition). Check URL and GID 1.")
+        # If basics fail, stop
         return
 
     # Basic Validation
     req_comp = ["Name of REIT", "Financial Year", "Period Ended", "Type of Committee"]
     if not all(c in df_comp_raw.columns for c in req_comp):
-        st.error(f"Sheet1 Missing columns: {[c for c in req_comp if c not in df_comp_raw.columns]}")
+        st.error(f"Sheet 1 Missing columns: {[c for c in req_comp if c not in df_comp_raw.columns]}")
         return
+
+    # Load Meetings Data (Optional)
+    df_meet_raw = pd.DataFrame()
+    if gid2.strip():
+        df_meet_raw = read_google_sheet_csv(url, gid2)
+        if df_meet_raw.empty:
+            st.warning(f"Could not load Sheet 2 (Meetings). Check GID {gid2}.")
 
     # Filters
     entity = st.selectbox("Choose REIT", sorted(df_comp_raw["Name of REIT"].unique()))
@@ -318,10 +328,15 @@ def render() -> None:
     # Final Composition Snapshot
     df_comp_now = df_cy[df_cy["Period Ended"] == period]
 
-    # Filter Meetings by Entity and FY (Meetings are checked for the whole FY)
+    # Filter Meetings by Entity and FY
     if not df_meet_raw.empty:
-        df_m = df_meet_raw[df_meet_raw["Name of REIT"] == entity]
-        df_my = df_m[df_m["Financial Year"] == fy]
+        # Check if columns exist
+        if "Name of REIT" in df_meet_raw.columns:
+            df_m = df_meet_raw[df_meet_raw["Name of REIT"] == entity]
+            df_my = df_m[df_m["Financial Year"] == fy]
+        else:
+            st.warning("Sheet 2 loaded but missing 'Name of REIT' column.")
+            df_my = pd.DataFrame()
     else:
         df_my = pd.DataFrame()
 
@@ -336,12 +351,7 @@ def render() -> None:
     for label, (comp_fn, filter_key) in committees.items():
         st.markdown(f"### {label}")
         
-        # 1. Composition
         sub_comp = df_comp_now[df_comp_now["Type of Committee"].str.lower() == filter_key.lower()]
-        
-        # Calculate Total Members for Quorum usage
-        # Note: We take the total member count from the composition snapshot
-        # This includes non-directors if they are members, as quorum usually applies to 'members'
         total_members_count = len(sub_comp)
 
         c1, c2 = st.columns(2)
@@ -350,11 +360,13 @@ def render() -> None:
             st.caption("Composition Checks")
             st.table(comp_fn(sub_comp))
 
-        # 2. Meetings
         with c2:
             st.caption("Meeting Compliance (FY)")
             if df_my.empty:
-                st.info("No meeting data loaded (Sheet2).")
+                if not gid2.strip():
+                    st.info("Enter 'Sheet 2 GID' in sidebar to load meetings.")
+                else:
+                    st.info("No meeting data loaded.")
             else:
                 sub_meet = df_my[df_my["Type of Committee"].str.lower() == filter_key.lower()]
                 st.table(evaluate_meetings(label, sub_meet, total_members_count))
