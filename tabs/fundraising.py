@@ -132,7 +132,7 @@ def render():
         default_url = DEFAULT_INVIT_FUND_URL if segment == "InvIT" else DEFAULT_REIT_FUND_URL
 
         data_url = st.text_input(
-            "Data URL (public Google Sheet / CSV / XLSX / JSON / HTML table)",
+            "Data URL",
             value=default_url,
             key=f"fund_url_{segment}",
         )

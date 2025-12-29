@@ -196,7 +196,7 @@ def render():
         )
         default_url = DEFAULT_REIT_DIR_URL if seg == "REIT" else DEFAULT_INVIT_DIR_URL
         url = st.text_input(
-            "Data URL (Google Sheet - public view)",
+            "Data URL",
             value=default_url or "",
             placeholder="Paste a public Google Sheet URL…",
             key=f"bd_url_{seg}"

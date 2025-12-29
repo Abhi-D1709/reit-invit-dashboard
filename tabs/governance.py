@@ -504,7 +504,7 @@ def render() -> None:
     seg = st.sidebar.selectbox("Select Segment", ["REIT"], index=0)
     _ = seg  # reserved for future InvIT support
 
-    url = st.sidebar.text_input("Data URL (Google Sheet - public view)", value=DEFAULT_GOVERNANCE_URL)
+    url = st.sidebar.text_input("Data URL", value=DEFAULT_GOVERNANCE_URL)
 
     comp, meetings, board, ind, notes = _load_all_sheets(url)
     if notes:

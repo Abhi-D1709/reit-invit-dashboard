@@ -387,7 +387,7 @@ def render():
     with st.sidebar:
         seg = st.selectbox("Select Segment", ["REIT", "InvIT"], index=0)
         gsheet_url = st.text_input(
-            "Data URL (Google Sheet - public view)",
+            "Data URL",
             value=DEFAULT_SHEET_URL_TRUST,
             help=f"Trust sheet: '{TRUST_SHEET_NAME}'. SPV sheet: '{SPV_SHEET_NAME}'.",
         )
