@@ -112,6 +112,18 @@ def multiselect_with_select_all(
 # --------------------------- Page ---------------------------
 
 def render():
+    st.markdown(
+        """
+        <style>
+        /* give the page some breathing room at the top */
+        .block-container { padding-top: 1.2rem !important; }
+        /* prevent visual clipping on some browsers/zooms */
+        h1, .stMarkdown h1 { line-height: 1.2 !important; padding-top: 0.1rem !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.header("Fund Raising")
     _inject_page_css()
     with st.sidebar:
