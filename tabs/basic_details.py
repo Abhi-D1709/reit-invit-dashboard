@@ -202,10 +202,6 @@ def render():
             key=f"bd_url_{seg}"
         )
 
-    if not url.strip():
-        st.info("Paste a public sheet URL to begin.")
-        return
-
     # ---- Sheet1: core directory ----
     try:
         df1 = _load_sheet1(url)
