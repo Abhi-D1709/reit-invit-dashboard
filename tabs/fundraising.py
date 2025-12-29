@@ -114,13 +114,18 @@ def multiselect_with_select_all(
 def render():
     st.header("Fund Raising")
     _inject_page_css()
+    with st.sidebar:
+        segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_fund")
+        # compute the default URL after segment is chosen
+        default_url = DEFAULT_INVIT_FUND_URL if segment == "InvIT" else DEFAULT_REIT_FUND_URL
 
-    segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_fund")
-    default_url = DEFAULT_INVIT_FUND_URL if segment == "InvIT" else DEFAULT_REIT_FUND_URL
+        data_url = st.text_input(
+            "Data URL (public Google Sheet / CSV / XLSX / JSON / HTML table)",
+            value=default_url,
+            key=f"fund_url_{segment}",
+        )
+        data_url = data_url.strip()
 
-    st.subheader("Data Source")
-    st.caption("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table).")
-    data_url = st.text_input("Data URL", value=default_url, key=f"fund_url_{segment}").strip()
     if not data_url:
         st.warning("Please provide a data URL.")
         st.stop()
