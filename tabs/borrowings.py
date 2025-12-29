@@ -160,12 +160,17 @@ def _render_unitholder_and_compliances_ui(row):
 
 def render():
     st.header("Borrowings")
-    segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_borrow")
-    default_url = DEFAULT_INVIT_BORR_URL if segment == "InvIT" else DEFAULT_REIT_BORR_URL
+    with st.sidebar:
+        segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_borrow")
+        # compute the default URL after segment is chosen
+        default_url = DEFAULT_INVIT_BORR_URL if segment == "InvIT" else DEFAULT_REIT_BORR_URL
 
-    st.subheader("Data Source")
-    st.caption("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table).")
-    data_url = st.text_input("Data URL", value=default_url, key=f"borr_url_{segment}")
+        data_url = st.text_input(
+            "Data URL (public Google Sheet / CSV / XLSX / JSON / HTML table)",
+            value=default_url,
+            key=f"fund_url_{segment}",
+        )
+        data_url = data_url.strip()
 
     if not data_url.strip():
         st.warning("Please provide a data URL."); st.stop()

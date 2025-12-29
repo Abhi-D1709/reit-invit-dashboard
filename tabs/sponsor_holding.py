@@ -129,20 +129,24 @@ def _stacked_meter_html(s_pct: float, p_pct: float) -> str:
 
 def render():
     st.header("Sponsor Holding")
+    with st.sidebar:
+        seg = st.selectbox("Select Segment", ["REIT", "InvIT"], key="sp_seg")
+        # compute the default URL after segment is chosen
+        default_url = DEFAULT_INVIT_SPON_URL if seg == "InvIT" else DEFAULT_REIT_SPON_URL
 
-    seg = st.selectbox("Select Segment", ["REIT", "InvIT"], key="sp_seg")
-    default_url = DEFAULT_INVIT_SPON_URL if seg == "InvIT" else DEFAULT_REIT_SPON_URL
+        data_url = st.text_input(
+            "Data URL (public Google Sheet / CSV / XLSX / JSON / HTML table)",
+            value=default_url,
+            key=f"fund_url_{seg}",
+        )
+        data_url = data_url.strip()
 
-    st.subheader("Data Source")
-    st.caption("Paste a public URL (Google Sheet / CSV / XLSX / JSON / HTML table).")
-    url = st.text_input("Data URL", value=default_url, key=f"sp_url_{seg}")
-
-    if not url.strip():
+    if not data_url.strip():
         st.warning("Please provide a data URL.")
         st.stop()
 
     try:
-        df = _load_sponsor_df(url.strip())
+        df = _load_sponsor_df(data_url.strip())
     except Exception as e:
         st.error(f"Could not read the URL. Make sure it’s publicly accessible.\n\nDetails: {e}")
         st.stop()
