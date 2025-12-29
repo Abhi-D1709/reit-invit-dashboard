@@ -188,9 +188,8 @@ def render():
     st.header("Basic Details")
 
     with st.sidebar:
-        st.markdown("### Basic Details — Controls")
         seg = st.selectbox(
-            "Segment",
+            "Select Segment",
             ["REIT", "InvIT"],
             index=0,
             key="bd_segment"
@@ -200,7 +199,6 @@ def render():
             "Data URL (Google Sheet - public view)",
             value=default_url or "",
             placeholder="Paste a public Google Sheet URL…",
-            help="Same file should contain: Sheet1 (directory) and Sheet2 (FY-wise SPV/HoldCo).",
             key=f"bd_url_{seg}"
         )
 
