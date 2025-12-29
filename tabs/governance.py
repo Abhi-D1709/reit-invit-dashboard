@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Tuple
+from typing import Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,6 @@ import streamlit as st
 _HARDCODED = (
     "https://docs.google.com/spreadsheets/d/1ETx5UZKQQyZKxkF4fFJ4R9wa7i7TNp7EXIhHWiVYG7s/edit?usp=sharing"
 )
-
 DEFAULT_GOVERNANCE_URL = _HARDCODED
 try:
     from utils import common as _common  # type: ignore
@@ -31,7 +30,6 @@ except Exception:
 # --------------------------------------------------------------------
 def _clean_str(x) -> str:
     s = "" if x is None or (isinstance(x, float) and np.isnan(x)) else str(x)
-    # collapse whitespace, remove leading/trailing newlines etc.
     s = re.sub(r"\s+", " ", s.replace("\u00A0", " ")).strip()
     return s
 
@@ -43,10 +41,10 @@ def _as_bool(x) -> bool:
 
 def _is_independent(type_cell: str) -> bool:
     """
-    Robust independence classifier.
-    - Treats values that START with 'non independent' (with/without hyphen) as NOT independent
-    - Treats values that START with 'independent' as independent
-    - Ignores case, hyphens, and extra spaces
+    Robust independence classifier:
+      - values that START with 'non independent' (with/without hyphen) => NOT independent
+      - values that START with 'independent' => independent
+      - ignores case/hyphens/extra spaces
     """
     s = _clean_str(type_cell).lower().replace("-", " ")
     s = re.sub(r"\s+", " ", s)
@@ -55,31 +53,32 @@ def _is_independent(type_cell: str) -> bool:
     return s.startswith("independent")
 
 
+def _is_non_exec(role_cell: str) -> bool:
+    s = _clean_str(role_cell).lower().replace("-", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.startswith("non executive")
+
+
 def _is_director(type_cell: str) -> bool:
     """
-    Checks if the member is explicitly identified as a Director.
-    Looks for the substring 'director' in the type description.
+    Treat as 'director' only when the type explicitly contains 'director'
+    (e.g., 'Independent Director', 'Non-Independent Director', 'Executive Director').
+    This excludes CXO/CEO/Company Secretary/etc.
     """
     s = _clean_str(type_cell).lower()
     return "director" in s
 
 
-def _is_non_exec(role_cell: str) -> bool:
-    s = _clean_str(role_cell).lower().replace("-", " ")
-    s = re.sub(r"\s+", " ", s)
-    # Accept exactly 'non executive' (or begins with it)
-    return s.startswith("non executive")
+def _filter_directors(df: pd.DataFrame) -> pd.DataFrame:
+    return df[df["Type of Members of Committee"].apply(_is_director)].copy()
 
 
 @st.cache_data(show_spinner=False)
 def read_google_sheet_public(url: str) -> pd.DataFrame:
     """
     Reads a publicly shared Google Sheet (viewer link) by swapping to CSV export.
-    Works when the default sheet is the one that contains the governance data.
     """
     url = _clean_str(url)
-    # Convert the edit URL to export?format=csv
-    # supports both /edit and /view URLs
     if "/edit" in url:
         base = url.split("/edit")[0]
     elif "/view" in url:
@@ -92,7 +91,7 @@ def read_google_sheet_public(url: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------
-# Core evaluation per-committee
+# Core evaluation per-committee  (DIRECTOR-ONLY counting where relevant)
 # --------------------------------------------------------------------
 def evaluate_audit(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -105,26 +104,35 @@ def evaluate_audit(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    members = len(df)
-    # Count only those who are actually directors
-    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
-    
-    indep = df["Type of Members of Committee"].apply(_is_independent).sum()
-    indep_ratio_ok = indep * 3 >= members * 2  # indep/members >= 2/3
-    has_fin_exp = df["Is this member identified as having accounting or related Financial Management Expertise."].apply(_as_bool).any()
+    df_dir = _filter_directors(df)
+    members = len(df_dir)
 
-    chair_rows = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
-    if chair_rows.empty:
+    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
+    indep_ratio_ok = indep * 3 >= members * 2 if members else False
+
+    has_fin_exp = df_dir[
+        "Is this member identified as having accounting or related Financial Management Expertise."
+    ].apply(_as_bool).any()
+
+    # Chair: must exist AND be a director AND be independent
+    chair_rows_all = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
+    if chair_rows_all.empty:
         chair_indep = False
         chair_detail = "Chairperson: None found"
     else:
-        chair_indep = chair_rows["Type of Members of Committee"].apply(_is_independent).all()
-        chair_types = ", ".join(chair_rows["Type of Members of Committee"].tolist())
-        chair_detail = f"Chair type: {chair_types}"
+        chair_rows_dir = _filter_directors(chair_rows_all)
+        if chair_rows_dir.empty:
+            chair_indep = False
+            chair_detail = "Chairperson is not a director"
+        else:
+            chair_indep = chair_rows_dir["Type of Members of Committee"].apply(_is_independent).all()
+            chair_types = ", ".join(chair_rows_dir["Type of Members of Committee"].tolist())
+            chair_detail = f"Chair type: {chair_types}"
 
-    rows = [
-        ("Min 3 directors", director_count >= 3, f"Directors: {director_count} (Total Members: {members})"),
-        ("≥ 2/3 independent", bool(indep_ratio_ok), f"Independent: {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
+    rows: List[Tuple[str, bool, str]] = [
+        ("Min 3 directors", members >= 3, f"Members (directors only): {members}"),
+        ("≥ 2/3 independent", bool(indep_ratio_ok),
+         f"Independent (of directors): {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
         ("≥ 1 member has financial expertise", bool(has_fin_exp), "Yes" if has_fin_exp else "No"),
         ("Chairperson is independent", bool(chair_indep), chair_detail),
     ]
@@ -142,33 +150,33 @@ def evaluate_nrc(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    members = len(df)
-    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
-    
-    # Filter for directors to check if all DIRECTORS are non-executive
-    # (assuming the rule applies specifically to directors, though usually all NRC members are non-exec)
-    directors_only = df[df["Type of Members of Committee"].apply(_is_director)]
-    if directors_only.empty:
-        all_non_exec = False # No directors to check
-    else:
-        all_non_exec = directors_only["Role of Members of Committee"].apply(_is_non_exec).all()
+    df_dir = _filter_directors(df)
+    members = len(df_dir)
 
-    indep = df["Type of Members of Committee"].apply(_is_independent).sum()
-    indep_ratio_ok = indep * 3 >= members * 2
+    all_non_exec = df_dir["Role of Members of Committee"].apply(_is_non_exec).all() if members else False
+    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
+    indep_ratio_ok = indep * 3 >= members * 2 if members else False
 
-    chair_rows = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
-    if chair_rows.empty:
+    chair_rows_all = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
+    if chair_rows_all.empty:
         chair_indep = False
         chair_detail = "Chairperson: None found"
     else:
-        chair_indep = chair_rows["Type of Members of Committee"].apply(_is_independent).all()
-        chair_types = ", ".join(chair_rows["Type of Members of Committee"].tolist())
-        chair_detail = f"Chair type: {chair_types}"
+        chair_rows_dir = _filter_directors(chair_rows_all)
+        if chair_rows_dir.empty:
+            chair_indep = False
+            chair_detail = "Chairperson is not a director"
+        else:
+            chair_indep = chair_rows_dir["Type of Members of Committee"].apply(_is_independent).all()
+            chair_types = ", ".join(chair_rows_dir["Type of Members of Committee"].tolist())
+            chair_detail = f"Chair type: {chair_types}"
 
-    rows = [
-        ("Min 3 directors", director_count >= 3, f"Directors: {director_count}"),
-        ("All directors non-executive", bool(all_non_exec), "Yes" if all_non_exec else "Found executive director(s)"),
-        ("≥ 2/3 independent", bool(indep_ratio_ok), f"Independent: {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
+    rows: List[Tuple[str, bool, str]] = [
+        ("Min 3 directors", members >= 3, f"Members (directors only): {members}"),
+        ("All non-executive", bool(all_non_exec),
+         "All non-executive (directors)" if all_non_exec else "Found executive director(s)"),
+        ("≥ 2/3 independent", bool(indep_ratio_ok),
+         f"Independent (of directors): {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
         ("Chairperson is independent", bool(chair_indep), chair_detail),
     ]
     return _to_table(rows)
@@ -184,23 +192,28 @@ def evaluate_src(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    members = len(df)
-    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
-    indep = df["Type of Members of Committee"].apply(_is_independent).sum()
+    df_dir = _filter_directors(df)
+    members = len(df_dir)
+    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
 
-    chair_rows = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
-    if chair_rows.empty:
+    chair_rows_all = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
+    if chair_rows_all.empty:
         chair_non_exec = False
         chair_detail = "Chairperson: None found"
     else:
-        chair_non_exec = chair_rows["Role of Members of Committee"].apply(_is_non_exec).all()
-        roles = ", ".join(chair_rows["Role of Members of Committee"].tolist())
-        chair_detail = f"Chair role: {roles}"
+        chair_rows_dir = _filter_directors(chair_rows_all)
+        if chair_rows_dir.empty:
+            chair_non_exec = False
+            chair_detail = "Chairperson is not a director"
+        else:
+            chair_non_exec = chair_rows_dir["Role of Members of Committee"].apply(_is_non_exec).all()
+            roles = ", ".join(chair_rows_dir["Role of Members of Committee"].tolist())
+            chair_detail = f"Chair role: {roles}"
 
-    rows = [
+    rows: List[Tuple[str, bool, str]] = [
         ("Chairperson is non-executive", bool(chair_non_exec), chair_detail),
-        ("Min 3 directors", director_count >= 3, f"Directors: {director_count}"),
-        ("≥ 1 independent", indep >= 1, f"Independent: {indep}/{members}"),
+        ("Min 3 directors", members >= 3, f"Members (directors only): {members}"),
+        ("≥ 1 independent", indep >= 1, f"Independent (of directors): {indep}/{members}"),
     ]
     return _to_table(rows)
 
@@ -214,18 +227,18 @@ def evaluate_rmc(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    members = len(df)
-    director_count = df["Type of Members of Committee"].apply(_is_director).sum()
-    indep = df["Type of Members of Committee"].apply(_is_independent).sum()
+    df_dir = _filter_directors(df)
+    members = len(df_dir)
+    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
 
-    rows = [
-        ("Min 3 directors", director_count >= 3, f"Directors: {director_count}"),
-        ("≥ 1 independent", indep >= 1, f"Independent: {indep}/{members}"),
+    rows: List[Tuple[str, bool, str]] = [
+        ("Min 3 directors", members >= 3, f"Members (directors only): {members}"),
+        ("≥ 1 independent", indep >= 1, f"Independent (of directors): {indep}/{members}"),
     ]
     return _to_table(rows)
 
 
-def _to_table(rows: list[Tuple[str, bool, str]]) -> pd.DataFrame:
+def _to_table(rows: List[Tuple[str, bool, str]]) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "Check": [r[0] for r in rows],
@@ -257,7 +270,6 @@ def render() -> None:
         st.warning("No rows loaded from the provided Google Sheet.")
         return
 
-    # Ensure required columns exist after reading
     required = [
         "Name of REIT",
         "Financial Year",
@@ -275,10 +287,8 @@ def render() -> None:
         st.dataframe(df.head())
         return
 
-    # Clean up cells
     df = df.applymap(_clean_str)
 
-    # Filters
     entity = st.selectbox("Choose REIT", sorted(df["Name of REIT"].unique()))
     df_e = df[df["Name of REIT"] == entity]
 
@@ -288,10 +298,8 @@ def render() -> None:
 
     periods = sorted(df_ey["Period Ended"].unique())
     period = st.selectbox("Period Ended", periods, index=0)
-
     df_now = df_ey[df_ey["Period Ended"] == period]
 
-    # Committees
     committees = {
         "Audit Committee": evaluate_audit,
         "Nomination and Remuneration Committee": evaluate_nrc,
@@ -305,6 +313,5 @@ def render() -> None:
         st.table(fn(sub))
 
 
-# Convenience entry point for pages/7_Governance.py
 def render_governance() -> None:
     render()
