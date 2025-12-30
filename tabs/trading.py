@@ -4,6 +4,7 @@ import re
 import time
 import random
 import datetime as dt
+import io  # Added for CSV parsing
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple, List, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,7 +34,8 @@ def _normalize_bse_code(s: str) -> str:
 
 @st.cache_data(ttl=60 * 30, show_spinner="Loading entity list...")
 def load_entities(url: str) -> pd.DataFrame:
-    cols = ["Type of Entity", "Name of Entity", "NSE Symbol", "NSE Series", "BSE Scrip Code"]
+    # UPDATED: Added "ISIN" to the columns list
+    cols = ["Type of Entity", "Name of Entity", "NSE Symbol", "NSE Series", "BSE Scrip Code", "ISIN"]
     try:
         df = pd.read_csv(url)
     except Exception as e:
@@ -44,7 +46,8 @@ def load_entities(url: str) -> pd.DataFrame:
     for col, func in {
         "Type of Entity": _clean_str, "Name of Entity": _clean_str,
         "NSE Symbol": lambda s: _clean_str(s).upper(), "NSE Series": lambda s: _clean_str(s).upper(),
-        "BSE Scrip Code": _normalize_bse_code
+        "BSE Scrip Code": _normalize_bse_code,
+        "ISIN": _clean_str  # UPDATED: Added cleaner for ISIN
     }.items():
         if col in df.columns: df[col] = df[col].map(func)
     return df
@@ -83,13 +86,13 @@ def line_bar_figure(df: pd.DataFrame, title: str, *, monthly=False) -> Optional[
     if df.empty: return None
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_bar(x=df["date"], y=df["volume"], name="Volume", opacity=0.5, marker_line_width=0)
-    fig.add_trace(go.Scatter(x=df["date"], y=df["close"], name="Close", mode="lines", line=dict(width=2)), secondary_y=True)
+    fig.add_trace(go.Scatter(x=df["date"], y=df["close"], name="Close/VWAP", mode="lines", line=dict(width=2)), secondary_y=True)
     fig.update_layout(title=title, height=520, barmode="overlay", bargap=0.25 if monthly else 0.10, hovermode="x unified",
                       margin=dict(l=40, r=20, t=60, b=40), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                       template="simple_white")
     if not monthly: fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
     fig.update_yaxes(title_text="Volume", secondary_y=False)
-    fig.update_yaxes(title_text="Close", secondary_y=True)
+    fig.update_yaxes(title_text="Price", secondary_y=True)
     return fig
 
 def volume_only_bar(df: pd.DataFrame, title: str, *, monthly=False) -> Optional[go.Figure]:
@@ -119,97 +122,139 @@ def _tail_windows(start: dt.date, end: dt.date, max_dt: Optional[dt.date], month
     return [(d1, end)] if d1 <= end else []
 
 # --------------------------- live fetchers ---------------------------
+
 @st.cache_data(ttl=15 * 60, show_spinner=False)
-def get_bse_data(scripcode: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    scripcode = _normalize_bse_code(scripcode or "")
-    if not scripcode: return pd.DataFrame(columns=["date", "close", "volume"])
-    url = f"https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w?scripcode={scripcode}&flag=1&fromdate={start.strftime('%Y%m%d')}&todate={end.strftime('%Y%m%d')}&seriesid="
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.bseindia.com/"}
-    try:
-        with requests.Session() as s:
-            s.get("https://www.bseindia.com/", timeout=15)
-            r = s.get(url, headers=headers, timeout=15)
-            r.raise_for_status()
-            
-            raw_data = r.json().get("Data", "[]")
-            series = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
-            
-            # ROBUST FIX: Ensure series is a list before creating DataFrame
-            if not isinstance(series, list):
-                return pd.DataFrame(columns=["date", "close", "volume"])
-            
-            if not series:  # Empty list
-                return pd.DataFrame(columns=["date", "close", "volume"])
-            
-            df = pd.DataFrame(series)
-            if df.empty: return df
+def get_bse_data(isin: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """
+    New Logic: Fetches daily Bhavcopy CSVs from BSE and filters by ISIN.
+    Calculates WAP as Total Turnover / Total Volume.
+    """
+    isin = _clean_str(isin)
+    if not isin: return pd.DataFrame(columns=["date", "close", "volume"])
 
-            # Verify required columns exist
-            required_cols = ["dttm", "vale1", "vole"]
-            if not all(col in df.columns for col in required_cols):
-                return pd.DataFrame(columns=["date", "close", "volume"])
+    # Generates a list of dates between start and end
+    dates = pd.date_range(start=start, end=end, freq='D')
+    results = []
 
-            df["date"] = pd.to_datetime(df["dttm"], errors="coerce").dt.date
-            df["close"] = pd.to_numeric(df["vale1"], errors="coerce")
-            df["volume"] = pd.to_numeric(df["vole"], errors="coerce")
+    # Use a session for faster repeated requests
+    session = requests.Session()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for d in dates:
+        # Construct the official Bhavcopy URL: 20251229 format
+        date_str = d.strftime("%Y%m%d")
+        url = f"https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BSE_CM_0_0_0_{date_str}_F_0000.CSV"
+        
+        try:
+            response = session.get(url, headers=headers, timeout=10)
             
-            # Remove rows with any NaN values
-            result = df[["date", "close", "volume"]].dropna().sort_values("date")
-            return result
+            # 404 means holiday or weekend (no file exists)
+            if response.status_code == 404:
+                continue
             
-    except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError, TypeError):
+            response.raise_for_status()
+            
+            # Parse the CSV directly from memory
+            # We only read the columns we need to speed it up
+            # Columns in BSE Bhavcopy: ISIN, TtlTradgVol, TtlTrfVal, TradDt
+            use_cols = ["ISIN", "TtlTradgVol", "TtlTrfVal", "TradDt"]
+            
+            # Use io.StringIO to parse the text content
+            daily_df = pd.read_csv(io.StringIO(response.text), usecols=lambda c: c in use_cols)
+            
+            # Filter for our specific ISIN
+            row = daily_df[daily_df["ISIN"] == isin]
+            
+            if not row.empty:
+                vol = float(row.iloc[0]["TtlTradgVol"])
+                val = float(row.iloc[0]["TtlTrfVal"])
+                
+                # Calculate WAP (Weighted Average Price)
+                # Avoid division by zero
+                wap = (val / vol) if vol > 0 else 0.0
+                
+                results.append({
+                    "date": d.date(),
+                    "volume": vol,
+                    "close": wap
+                })
+
+        except Exception:
+            # Silently fail on bad CSVs or connection errors to keep the loop moving
+            continue
+
+    if not results:
         return pd.DataFrame(columns=["date", "close", "volume"])
+
+    return pd.DataFrame(results).sort_values("date")
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def get_nse_data(symbol: str, series: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """
+    Fetches NSE data using the NextApi endpoint.
+    Retrieves 'vwap' and maps it to 'close', as requested.
+    Uses strict 90-day chunking to avoid API truncation on long ranges.
+    """
     if start > end: return pd.DataFrame(columns=["date", "close", "volume"])
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.nseindia.com/"}
-    series_json = json.dumps([series])
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Referer": "https://www.nseindia.com/"
+    }
+
     def fetch_range(d1, d2):
-        url = f"https://www.nseindia.com/api/historical/cm/equity?symbol={symbol}&series={series_json}&from={d1.strftime('%d-%m-%Y')}&to={d2.strftime('%d-%m-%Y')}"
+        # We omit csv=true to get the JSON response directly.
+        url = (
+            f"https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi"
+            f"?functionName=getHistoricalTradeData&symbol={symbol}&series={series}"
+            f"&fromDate={d1.strftime('%d-%m-%Y')}&toDate={d2.strftime('%d-%m-%Y')}"
+        )
+        
         try:
+            # Random sleep to be polite/avoid rate limits during chunked fetching
+            time.sleep(random.uniform(0.1, 0.4))
+            
             with requests.Session() as s:
                 s.get("https://www.nseindia.com", headers=headers, timeout=15)
                 r = s.get(url, headers=headers, timeout=15)
                 r.raise_for_status()
                 
-                data = r.json().get("data", [])
+                data = r.json()
                 
-                # ROBUST FIX: Ensure data is a list before creating DataFrame
-                if not isinstance(data, list):
-                    return pd.DataFrame(columns=["date", "close", "volume"])
-                    
-                if not data:  # Empty list
+                if not isinstance(data, list) or not data:
                     return pd.DataFrame(columns=["date", "close", "volume"])
                 
                 df = pd.DataFrame(data)
                 if df.empty: return df
                 
-                # Verify required columns exist
-                required_cols = ["CH_TIMESTAMP", "CH_CLOSING_PRICE", "CH_TOT_TRADED_QTY"]
-                if not all(col in df.columns for col in required_cols):
-                    return pd.DataFrame(columns=["date", "close", "volume"])
+                if "mtimestamp" not in df.columns:
+                     return pd.DataFrame(columns=["date", "close", "volume"])
+
+                # Parse specific new fields: mtimestamp, vwap, chTotTradedQty
+                # Format: "29-Dec-2025" (%d-%b-%Y)
+                df["date"] = pd.to_datetime(df["mtimestamp"], format="%d-%b-%Y", errors="coerce").dt.date
                 
-                df["date"] = pd.to_datetime(df["CH_TIMESTAMP"], errors="coerce").dt.date
-                df["close"] = pd.to_numeric(df["CH_CLOSING_PRICE"], errors="coerce")
-                df["volume"] = pd.to_numeric(df["CH_TOT_TRADED_QTY"], errors="coerce")
+                # Map vwap to 'close' as requested
+                df["close"] = pd.to_numeric(df["vwap"], errors="coerce")
+                df["volume"] = pd.to_numeric(df["chTotTradedQty"], errors="coerce")
                 
-                # Remove rows with any NaN values
                 result = df[["date", "close", "volume"]].dropna()
                 return result
                 
         except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError, TypeError):
             return pd.DataFrame(columns=["date", "close", "volume"])
             
+    # NSE API often truncates data if the range is too large (even if they say 365 days).
+    # We use 90-day chunks to be safe and ensure full data retrieval.
+    chunk_days = 90
     windows, e = [], end
     while e >= start:
-        s = max(start, e - dt.timedelta(days=364))
+        s = max(start, e - dt.timedelta(days=chunk_days))
         windows.append((s, e)); e = s - dt.timedelta(days=1)
-    parts = [fetch_range(d1, d2) for d1, d2 in windows if d1 <= d2]
-    if not parts: return pd.DataFrame(columns=["date", "close", "volume"])
     
-    # Filter out empty DataFrames before concatenating
-    valid_parts = [part for part in parts if not part.empty]
+    parts = [fetch_range(d1, d2) for d1, d2 in windows if d1 <= d2]
+    
+    valid_parts = [part for part in parts if part is not None and not part.empty]
     if not valid_parts: return pd.DataFrame(columns=["date", "close", "volume"])
     
     return pd.concat(valid_parts, ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
@@ -241,19 +286,34 @@ def get_nse_data_db_cached(entity_name, symbol, series, start, end, **kwargs) ->
     if not symbol or not series: return pd.DataFrame(columns=["date", "close", "volume"])
     return _get_data_with_db_cache(entity_name=entity_name, key=f"NSE:{symbol}:{series}".upper(), exchange="NSE", start=start, end=end, fetch_function=get_nse_data, fetch_args={"symbol": symbol, "series": series}, **kwargs)
 
-def get_bse_data_db_cached(entity_name, scrip, start, end, **kwargs) -> pd.DataFrame:
-    if not scrip: return pd.DataFrame(columns=["date", "close", "volume"])
-    return _get_data_with_db_cache(entity_name=entity_name, key=f"BSE:{scrip}", exchange="BSE", start=start, end=end, fetch_function=get_bse_data, fetch_args={"scripcode": scrip}, **kwargs)
+def get_bse_data_db_cached(entity_name, scrip, isin, start, end, **kwargs) -> pd.DataFrame:
+    # UPDATED: Accept ISIN and pass it to fetcher
+    if not isin: return pd.DataFrame(columns=["date", "close", "volume"])
+    
+    # We maintain the cache key as BSE:{scrip} for database consistency
+    return _get_data_with_db_cache(
+        entity_name=entity_name, 
+        key=f"BSE:{scrip}", 
+        exchange="BSE", 
+        start=start, 
+        end=end, 
+        fetch_function=get_bse_data, 
+        fetch_args={"isin": isin},  # New fetcher takes ISIN
+        **kwargs
+    )
 
 # -------------------------- one-entity fetch --------------------------
 def fetch_single_entity(
     row: pd.Series, start: dt.date, end: dt.date, monthly_mode: bool, use_cache_now: bool,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     cov = "monthly" if monthly_mode else "daily"
-    sym, series, scrip = row.get("NSE Symbol", ""), row.get("NSE Series", ""), row.get("BSE Scrip Code", "")
+    sym, series = row.get("NSE Symbol", ""), row.get("NSE Series", "")
+    scrip, isin = row.get("BSE Scrip Code", ""), row.get("ISIN", "") # UPDATED: Extract ISIN
     
     nse_df = get_nse_data_db_cached(row["Name of Entity"], sym, series, start, end, use_cache=use_cache_now, coverage=cov, tail_only=True)
-    bse_df = get_bse_data_db_cached(row["Name of Entity"], scrip, start, end, use_cache=use_cache_now, coverage=cov, tail_only=True)
+    
+    # UPDATED: Pass ISIN to the BSE fetcher wrapper
+    bse_df = get_bse_data_db_cached(row["Name of Entity"], scrip, isin, start, end, use_cache=use_cache_now, coverage=cov, tail_only=True)
 
     if monthly_mode:
         if nse_df is not None and not nse_df.empty: nse_df = to_monthly(nse_df)
