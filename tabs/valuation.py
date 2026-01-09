@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import html
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import pandas as pd
 import requests
@@ -13,12 +13,16 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup  # type: ignore
 import streamlit as st
 
-# Supabase
+# Supabase: import create_client at runtime; import Client only for type-checking.
 try:
-    from supabase import create_client, Client  # type: ignore
+    from supabase import create_client  # type: ignore
 except Exception:  # library not installed yet
     create_client = None
-    Client = object  # type: ignore
+
+if TYPE_CHECKING:
+    from supabase import Client  # type: ignore
+else:
+    Client = Any  # type: ignore
 
 # ------------------------------------------------------------
 # Config: read public sheet URL from utils.common (no hardcode)
@@ -182,8 +186,14 @@ def _fetch_page(session: requests.Session, url_tpl: str, page: int) -> Tuple[int
     except Exception:
         return page, None
 
-def _discover_last_valid_page(session: requests.Session, url_tpl: str, kind_for_parse: str,
-                              start: int = 1, window: int = 30, max_page: int = 2000) -> int:
+def _discover_last_valid_page(
+    session: requests.Session,
+    url_tpl: str,
+    kind_for_parse: str,
+    start: int = 1,
+    window: int = 30,
+    max_page: int = 2000,
+) -> int:
     """Walk in windows until a window has no tables. Return last valid page, 0 if none."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -294,7 +304,6 @@ def supabase_replace_registry(df: pd.DataFrame) -> bool:
         return False
     try:
         # Ensure we’re using service key (writes)
-        # A delete will fail on anon; we swallow and return False.
         sb.table("ibbi_registry").delete().neq("reg_norm", "").execute()
         # Insert in chunks
         recs = df.to_dict(orient="records")
@@ -308,7 +317,10 @@ def supabase_replace_registry(df: pd.DataFrame) -> bool:
 # ------------------------------------------------------------
 # Business rules
 # ------------------------------------------------------------
-def check_tenure_leq_4yrs(appoint: Optional[pd.Timestamp], resign: Optional[pd.Timestamp]) -> tuple[bool, Optional[float]]:
+def check_tenure_leq_4yrs(
+    appoint: Optional[pd.Timestamp],
+    resign: Optional[pd.Timestamp],
+) -> Tuple[bool, Optional[float]]:
     if isinstance(appoint, pd.Timestamp):
         end_dt = resign if isinstance(resign, pd.Timestamp) else pd.Timestamp(date.today())
         yrs = _years_between(appoint, end_dt)
