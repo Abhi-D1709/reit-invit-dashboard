@@ -18,18 +18,14 @@ from bs4 import BeautifulSoup
 # ------------------------------------------------------------
 try:
     from utils.common import (
-        VALUATION_REIT_SHEET_URL,   # you added this in common.py
-        inject_global_css,          # keep your global look & feel
-        load_table_url,             # preferred loader if present
+        VALUATION_REIT_SHEET_URL,
+        inject_global_css,
+        load_table_url,
     )
     DEFAULT_VALUATION_URL = VALUATION_REIT_SHEET_URL.strip()
-    _HAS_COMMON_LOADER = True
 except Exception:
     DEFAULT_VALUATION_URL = ""
-    _HAS_COMMON_LOADER = False
-
-    def inject_global_css() -> None:
-        pass
+    def inject_global_css() -> None: pass
 
     def _gsheet_csv_from_share(url: str, gid: Optional[int] = None) -> str:
         if not url: return url
@@ -51,7 +47,7 @@ except Exception:
                 return pd.DataFrame()
 
 # ------------------------------------------------------------
-# Supabase client
+# Supabase client & Fetching Logic
 # ------------------------------------------------------------
 def _get_supabase_creds() -> Tuple[str, str]:
     url, key = "", ""
@@ -82,19 +78,43 @@ def _sb_client():
         raise RuntimeError("Supabase credentials not found.")
     return create_client(url, key)
 
+# UPDATED: Added pagination to fetch ALL rows, not just the first 1000
+@st.cache_data(ttl=3600, show_spinner="Loading registry from database...")
 def _sb_select_all(table: str) -> pd.DataFrame:
-    try:
-        # Limit to 10,000 rows to be safe, though registry is smaller
-        resp = _sb_client().table(table).select("*").limit(10000).execute()
-        data: List[Dict[str, Any]] = resp.data or []
-        df = pd.DataFrame(data)
+    all_rows = []
+    start = 0
+    batch_size = 1000  # Matches default Supabase API limit
+    
+    client = _sb_client()
+    
+    while True:
+        try:
+            # .range() is inclusive: 0-999, 1000-1999
+            resp = client.table(table).select("*").range(start, start + batch_size - 1).execute()
+            rows = resp.data or []
+            
+            if not rows:
+                break
+                
+            all_rows.extend(rows)
+            
+            # If we got fewer rows than requested, we've reached the end
+            if len(rows) < batch_size:
+                break
+                
+            start += batch_size
+        except Exception as e:
+            st.error(f"Error fetching from {table}: {e}")
+            break
+
+    df = pd.DataFrame(all_rows)
+    if not df.empty:
         if "reg_no" in df.columns:
             df["reg_no"] = df["reg_no"].astype(str).str.strip().str.upper()
         if "name" in df.columns:
             df["name"] = df["name"].astype(str).str.strip()
-        return df
-    except Exception:
-        return pd.DataFrame()
+            
+    return df
 
 def _sb_upsert(table: str, rows: List[Dict[str, Any]]) -> None:
     if not rows:
@@ -209,9 +229,6 @@ def _fetch_all_pages(base_url: str, parse_fn) -> List[Dict[str, Any]]:
             if html: results.extend(parse_fn(html))
     return results
 
-# UPDATED: We removed @st.cache_data here so we can call it manually to force refresh.
-# We will cache the RESULT in _ensure_registry instead if needed, 
-# or rely on the DB as the cache.
 def scrape_ibbi_registry() -> Tuple[pd.DataFrame, pd.DataFrame]:
     indiv_rows = _fetch_all_pages(INDIV_BASE, _parse_individuals)
     ent_rows   = _fetch_all_pages(ENT_BASE, _parse_entities)
@@ -225,35 +242,34 @@ def scrape_ibbi_registry() -> Tuple[pd.DataFrame, pd.DataFrame]:
     return df_ind, df_ent
 
 def _ensure_registry(force_refresh: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    1. If force_refresh is True, skip DB read and SCRAPE immediately.
-    2. Else, read from Supabase.
-    3. If Supabase empty, SCRAPE.
-    4. If SCRAPE produces data, UPSERT to Supabase.
-    """
+    # 1. Clear cache if forcing refresh
+    if force_refresh:
+        _sb_select_all.clear()
+        
     ind, ent = pd.DataFrame(), pd.DataFrame()
     
-    # 1. Try DB first if not forcing
+    # 2. Try DB first (now supports pagination)
     if not force_refresh:
         ind = _sb_select_all("ibbi_rv_individuals")
         ent = _sb_select_all("ibbi_rv_entities")
         if not ind.empty or not ent.empty:
             return ind, ent
 
-    # 2. Scrape if forced or if DB was empty
-    # This might take 1-2 minutes
+    # 3. Scrape if forced or if DB was empty
     with st.spinner("Fetching latest IBBI registry data from ibbi.gov.in..."):
         ind_new, ent_new = scrape_ibbi_registry()
         
-        # 3. Upsert to Supabase
+        # 4. Upsert to Supabase
         if not ind_new.empty:
             _sb_upsert("ibbi_rv_individuals", ind_new.to_dict("records"))
-            ind = ind_new
         if not ent_new.empty:
             _sb_upsert("ibbi_rv_entities", ent_new.to_dict("records"))
-            ent = ent_new
             
-    return ind, ent
+        # 5. Clear cache again so next load pulls the fresh data from DB
+        _sb_select_all.clear()
+        
+        # 6. Return the newly scraped data directly for this run
+        return ind_new, ent_new
 
 # ------------------------------------------------------------
 # Valuation logic
@@ -349,7 +365,6 @@ def render():
         
         st.divider()
         st.subheader("Data Controls")
-        # UPDATED: Added refresh button
         force_refresh = st.button("🔄 Refresh IBBI Registry Data", help="Scrape latest data from ibbi.gov.in and update Supabase.")
 
     if seg != "REIT":
@@ -373,15 +388,11 @@ def render():
     entity = c1.selectbox("Entity", ent_list, index=0)
     fy     = c2.selectbox("Financial Year", ["All"] + fy_list, index=0)
 
-    # UPDATED: Pass the button state to the ensure function
+    # Fetch registry with pagination
     ibbi_ind, ibbi_ent = _ensure_registry(force_refresh=force_refresh)
     
     if force_refresh:
         st.success(f"Registry updated! Found {len(ibbi_ind)} individuals and {len(ibbi_ent)} entities.")
-
-    # Show warning if data is still missing (e.g. scrape failed)
-    if ibbi_ind.empty and ibbi_ent.empty:
-        st.warning("⚠️ The IBBI Registry database is empty. Click 'Refresh IBBI Registry Data' in the sidebar to populate it.")
 
     # Filter rows
     q = df_raw[df_raw["Name of REIT"] == entity].copy()
