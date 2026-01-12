@@ -406,7 +406,6 @@ def render():
     with st.sidebar:
         st.subheader("Select Segment")
         seg = st.radio("Segment", ["REIT", "InvIT"], index=0, label_visibility="collapsed")
-        st.caption("Data Source (Google Sheet – public view)")
         st.code(DEFAULT_VALUATION_URL or "(not set in utils/common.py)", language="text")
         
         st.divider()
