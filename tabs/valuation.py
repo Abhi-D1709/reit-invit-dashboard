@@ -62,25 +62,33 @@ except Exception:
                 return pd.DataFrame()
 
 # ------------------------------------------------------------
-# Supabase client (anon key only; same spirit as your trading tab)
+# Supabase client
 # ------------------------------------------------------------
 def _get_supabase_creds() -> Tuple[str, str]:
     """
-    Try [supabase] block first; then fall back to top-level SUPABASE_URL/KEY;
-    finally env vars. This mirrors how your trading module behaves.
+    1. Try [supabase_valuation] (specific for this tab).
+    2. Fallback to [supabase].
+    3. Fallback to env vars.
     """
     url = ""
     key = ""
+    
+    # 1. Try specific valuation secret
     try:
-        url = st.secrets.get("supabase", {}).get("url", "")
-        key = st.secrets.get("supabase", {}).get("anon_key", "")
+        url = st.secrets.get("supabase_valuation", {}).get("url", "")
+        key = st.secrets.get("supabase_valuation", {}).get("anon_key", "")
     except Exception:
         pass
 
+    # 2. Try generic supabase secret
     if not url or not key:
-        url = url or st.secrets.get("SUPABASE_URL", "")
-        key = key or st.secrets.get("SUPABASE_KEY", "")
+        try:
+            url = url or st.secrets.get("supabase", {}).get("url", "")
+            key = key or st.secrets.get("supabase", {}).get("anon_key", "")
+        except Exception:
+            pass
 
+    # 3. Env vars
     if not url or not key:
         url = url or os.getenv("SUPABASE_URL", "")
         key = key or os.getenv("SUPABASE_KEY", "")
@@ -93,8 +101,7 @@ def _sb_client():
     url, key = _get_supabase_creds()
     if not url or not key:
         raise RuntimeError(
-            "Supabase credentials not found. Set either [supabase] url/anon_key in secrets, "
-            "or SUPABASE_URL/SUPABASE_KEY."
+            "Supabase credentials not found. Set [supabase_valuation] or [supabase] in secrets."
         )
     return create_client(url, key)
 
