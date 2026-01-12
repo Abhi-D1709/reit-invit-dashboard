@@ -317,19 +317,65 @@ def _tenure_days(start_dt: Optional[date], end_dt: Optional[date]) -> Optional[i
     if not start_dt or not end_dt: return None
     return (end_dt - start_dt).days
 
+# ------------------------------------------------------------
+# Improved Matching Logic
+# ------------------------------------------------------------
 def _norm_name(s: str) -> str:
-    return re.sub(r"[\s\W]+", " ", (s or "")).strip().upper()
+    """
+    Normalizes names by:
+    1. Upper casing
+    2. Removing common honorifics (Mr, Ms, Mrs, Dr, etc.)
+    3. Removing ALL non-alphanumeric characters (spaces, dots, etc.)
+    
+    Example: "Mr. Manish Gupta" -> "MANISHGUPTA"
+             "L. Anuradha"      -> "LANURADHA"
+    """
+    if not s: return ""
+    
+    # 1. Basic cleanup
+    text = s.upper().strip()
+    
+    # 2. Remove common prefixes (honorifics). 
+    # We use a regex with \b to ensure we don't cut off real names starting with these letters.
+    # e.g., "Mrs." -> removed, but "Mrigank" -> kept.
+    prefixes = [
+        r"^MR[\.\s]+", r"^MS[\.\s]+", r"^MRS[\.\s]+", r"^DR[\.\s]+", 
+        r"^CA[\.\s]+", r"^CS[\.\s]+", r"^CMA[\.\s]+", r"^AR[\.\s]+"
+    ]
+    for p in prefixes:
+        text = re.sub(p, "", text)
+
+    # 3. Remove all non-alphanumeric characters (spaces, dots, commas)
+    # This ensures "L. Anuradha" == "L Anuradha" == "LAnuradha"
+    return re.sub(r"[^A-Z0-9]", "", text)
 
 def _match_in_registry(reg_no: str, valuer_name: str,
                        ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFrame) -> Tuple[bool, str]:
     rn = (reg_no or "").strip().upper()
-    nm = _norm_name(valuer_name)
+    
+    # Normalize the input name from the Google Sheet
+    target_name = _norm_name(valuer_name)
+    
+    # 1. Try matching by Registration Number (Primary Key - Most Accurate)
     if rn:
         if not ibbi_ind.empty and rn in set(ibbi_ind["reg_no"]): return True, "Individual"
         if not ibbi_ent.empty and rn in set(ibbi_ent["reg_no"]): return True, "Entity"
-    if nm:
-        if not ibbi_ind.empty and nm in set(_norm_name(x) for x in ibbi_ind["name"].astype(str)): return True, "Individual"
-        if not ibbi_ent.empty and nm in set(_norm_name(x) for x in ibbi_ent["name"].astype(str)): return True, "Entity"
+
+    # 2. Try matching by Name (Normalized)
+    if target_name:
+        # Check Individuals
+        if not ibbi_ind.empty:
+            # Create a set of normalized names from the registry ONCE for speed
+            ind_names = set(_norm_name(x) for x in ibbi_ind["name"].astype(str))
+            if target_name in ind_names:
+                return True, "Individual"
+
+        # Check Entities
+        if not ibbi_ent.empty:
+            ent_names = set(_norm_name(x) for x in ibbi_ent["name"].astype(str))
+            if target_name in ent_names:
+                return True, "Entity"
+
     return False, ""
 
 def evaluate_rows(df: pd.DataFrame, ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFrame) -> pd.DataFrame:
