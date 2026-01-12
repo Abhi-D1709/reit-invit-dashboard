@@ -6,3 +6,5 @@ altair>=5.0
 plotly>=5.19
 beautifulsoup4
 lxml
+supabase>=2.4,<3
+python-dateutil

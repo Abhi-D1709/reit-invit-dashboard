@@ -1,454 +1,564 @@
 # tabs/valuation.py
+
 from __future__ import annotations
 
+import concurrent.futures as cf
+import math
 import re
-import html
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from datetime import date, datetime, timedelta
+from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from bs4 import BeautifulSoup  # type: ignore
 import streamlit as st
-
-# Supabase: import create_client at runtime; import Client only for type-checking.
-try:
-    from supabase import create_client  # type: ignore
-except Exception:  # library not installed yet
-    create_client = None
-
-if TYPE_CHECKING:
-    from supabase import Client  # type: ignore
-else:
-    Client = Any  # type: ignore
+from bs4 import BeautifulSoup
+from dateutil.relativedelta import relativedelta
 
 # ------------------------------------------------------------
-# Config: read public sheet URL from utils.common (no hardcode)
+# Config & utilities
 # ------------------------------------------------------------
 try:
-    from utils.common import VALUATION_REIT_SHEET_URL  # type: ignore
-    DEFAULT_SHEET_URL = str(VALUATION_REIT_SHEET_URL).strip()
+    # Your shared helpers and URL live here
+    from utils.common import (
+        VALUATION_REIT_SHEET_URL,  # <- you added this in common.py
+        inject_global_css,         # keep your global look
+    )
+    DEFAULT_VALUATION_URL = VALUATION_REIT_SHEET_URL.strip()
 except Exception:
-    DEFAULT_SHEET_URL = ""
+    inject_global_css = lambda: None  # no-op fallback
+    DEFAULT_VALUATION_URL = ""
 
-# Base listing endpoints
-INDIVIDUAL_BASE = "https://ibbi.gov.in/service-provider/rvs?page={page}"
-ENTITY_BASE     = "https://ibbi.gov.in/service-provider/rvo-entities?page={page}"
+# If you already have a load_table_url helper in utils.common, use it.
+# Else fall back to a simple Google Sheets CSV-export reader.
+try:
+    from utils.common import load_table_url  # type: ignore
+    _HAS_COMMON_LOADER = True
+except Exception:
+    _HAS_COMMON_LOADER = False
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
-def _doc_id_from_share_url(url: str) -> Optional[str]:
-    m = re.search(r"/d/([^/]+)/", url or "")
-    return m.group(1) if m else None
+    def _gsheet_csv_from_share(url: str, gid: Optional[int] = None) -> str:
+        """
+        Convert a '.../edit?...' public share link to a CSV export link.
+        If gid is None, Google serves the active sheet.
+        """
+        if not url:
+            return url
+        m = re.match(r"(https://docs\.google\.com/spreadsheets/d/[^/]+)", url.strip())
+        if not m:
+            return url
+        base = m.group(1)
+        if gid is None:
+            return f"{base}/export?format=csv"
+        return f"{base}/export?format=csv&gid={gid}"
 
-def _csv_export_url(share_url: str, sheet_name: str) -> str:
-    doc_id = _doc_id_from_share_url(share_url)
-    if not doc_id:
-        return ""
-    return (
-        f"https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq"
-        f"?tqx=out:csv&sheet={requests.utils.quote(sheet_name)}"
-    )
-
-def _parse_date(value: Any) -> Optional[pd.Timestamp]:
-    """Return pd.Timestamp or None (no NaT in signatures to keep Pylance happy)."""
-    if isinstance(value, (pd.Timestamp, datetime)):
-        return pd.to_datetime(value)
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not s or s.upper() == "NA" or s == "-":
-        return None
-    s = re.sub(r"\s+", " ", html.unescape(s))
-    ts = pd.to_datetime(s, dayfirst=True, errors="coerce")
-    return None if pd.isna(ts) else ts
-
-def _years_between(d1: pd.Timestamp, d2: pd.Timestamp) -> float:
-    return float((d2 - d1).days) / 365.25
-
-def _normalize_name(x: str) -> str:
-    s = (x or "").lower()
-    s = re.sub(r"\b(mr|mrs|ms|dr|shri|smt|kum)\.?\s+", "", s)
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def _http_session(pool: int = 64) -> requests.Session:
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (REIT-INVIT-Dashboard Valuation)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Connection": "keep-alive",
-    })
-    retry = Retry(
-        total=3,
-        backoff_factor=0.5,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET"]),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(pool_connections=pool, pool_maxsize=pool, max_retries=retry)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    return s
+    def load_table_url(url: str, sheet: Optional[str] = None, gid: Optional[int] = None) -> pd.DataFrame:
+        """
+        Lightweight fallback loader: reads public Google Sheet via CSV export.
+        If 'sheet' is provided but gid is unknown, we still try CSV (active sheet).
+        """
+        csv_url = _gsheet_csv_from_share(url, gid=gid)
+        try:
+            return pd.read_csv(csv_url)
+        except Exception:
+            # final fallback: try pandas read_html on 'pubhtml' (requires Publish to web)
+            pub = url.replace("/edit", "/pubhtml")
+            try:
+                tables = pd.read_html(pub)
+                return tables[0] if tables else pd.DataFrame()
+            except Exception:
+                return pd.DataFrame()
 
 # ------------------------------------------------------------
-# Load Sheet1 (Valuers)
+# Supabase (anon key only, like your trading module)
 # ------------------------------------------------------------
-@st.cache_data(ttl=6 * 60 * 60)
-def load_valuers_sheet(sheet_url: str) -> pd.DataFrame:
-    csv_url = _csv_export_url(sheet_url, "Sheet1")
-    if not csv_url:
+from supabase import create_client
+
+@st.cache_resource(show_spinner=False)
+def sb():
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["anon_key"]  # anon only
+    return create_client(url, key)
+
+def _sb_load_registry(table: str) -> pd.DataFrame:
+    """
+    Load entire registry table. Returns empty DF if table missing/empty.
+    """
+    try:
+        resp = sb().table(table).select("*").execute()
+        data = resp.data or []
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        # normalize basic columns we care about
+        if "reg_no" in df.columns:
+            df["reg_no"] = df["reg_no"].astype(str).str.strip().str.upper()
+        if "name" in df.columns:
+            df["name"] = df["name"].astype(str).str.strip()
+        return df
+    except Exception:
         return pd.DataFrame()
 
-    df = pd.read_csv(csv_url)
-    df.columns = [c.strip() for c in df.columns]
+def _sb_registry_is_empty() -> bool:
+    ind = _sb_load_registry("ibbi_rv_individuals")
+    ent = _sb_load_registry("ibbi_rv_entities")
+    return ind.empty and ent.empty
 
-    # Align header spelling from the Google Sheet (“Finanical Year”, “Appointmnet”)
-    if "Financial Year" in df.columns and "Finanical Year" not in df.columns:
-        df.rename(columns={"Financial Year": "Finanical Year"}, inplace=True)
+def _sb_upsert(table: str, rows: List[Dict]):
+    """
+    Upsert rows with on_conflict 'reg_no'. Requires a UNIQUE index on reg_no and
+    permissive RLS (select/insert/update) for anon.
+    """
+    if not rows:
+        return
+    # chunk upserts to keep payloads reasonable
+    client = sb()
+    CHUNK = 1000
+    for i in range(0, len(rows), CHUNK):
+        batch = rows[i : i + CHUNK]
+        client.table(table).upsert(
+            batch, on_conflict="reg_no", ignore_duplicates=False
+        ).execute()
+
+# ------------------------------------------------------------
+# IBBI registry scraping (auto-discover page count, concurrent)
+# ------------------------------------------------------------
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/html,application/xhtml+xml",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+}
+
+INDIV_BASE = "https://ibbi.gov.in/service-provider/rvs?page={page}"
+ENT_BASE   = "https://ibbi.gov.in/service-provider/rvo-entities?page={page}"
+
+def _fetch_page(url: str) -> Optional[str]:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        if r.status_code != 200:
+            return None
+        return r.text
+    except Exception:
+        return None
+
+def _parse_individuals(html: str) -> List[Dict]:
+    """
+    Parse Individual RV table rows.
+    Expected table with class 'reporttable' and 'Registration No.' column.
+    """
+    out: List[Dict] = []
+    if not html:
+        return out
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", class_="reporttable")
+    if not table:
+        return out
+    tbody = table.find("tbody")
+    if not tbody:
+        return out
+    for tr in tbody.find_all("tr"):
+        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(tds) < 8:
+            continue
+        reg_no = (tds[1] or "").strip().upper()
+        name   = (tds[2] or "").strip()
+        addr   = (tds[3] or "").strip()
+        email  = (tds[4] or "").strip()
+        rvo    = (tds[5] or "").strip()
+        doj    = (tds[6] or "").strip()
+        asset  = (tds[7] or "").strip()
+        if not reg_no:
+            continue
+        out.append({
+            "reg_no": reg_no,
+            "name": name,
+            "address": addr,
+            "email": email,
+            "rvo": rvo,
+            "registration_date": doj,
+            "asset_class": asset,
+        })
+    return out
+
+def _parse_entities(html: str) -> List[Dict]:
+    """
+    Parse Entity RV table rows.
+    """
+    out: List[Dict] = []
+    if not html:
+        return out
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", class_="reporttable")
+    if not table:
+        return out
+    tbody = table.find("tbody")
+    if not tbody:
+        return out
+    for tr in tbody.find_all("tr"):
+        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(tds) < 9:
+            continue
+        reg_no = (tds[1] or "").strip().upper()
+        constitution = (tds[2] or "").strip()
+        name = (tds[3] or "").strip()
+        addr = (tds[4] or "").strip()
+        email = (tds[5] or "").strip()
+        rvo = (tds[6] or "").strip()
+        directors = (tds[7] or "").strip()
+        asset = (tds[8] or "").strip()
+        if not reg_no:
+            continue
+        out.append({
+            "reg_no": reg_no,
+            "name": name,
+            "constitution": constitution,
+            "address": addr,
+            "email": email,
+            "rvo": rvo,
+            "directors": directors,
+            "asset_class": asset,
+        })
+    return out
+
+def _discover_and_fetch(base_url: str, parse_fn, max_step: int = 64) -> List[Dict]:
+    """
+    Quickly discover how many pages exist by probing in exponentially growing chunks,
+    then fetch the discovered range concurrently.
+    """
+    results: List[Dict] = []
+
+    # Phase 1: discover upper bound of pages that still return rows
+    lo, hi = 1, max_step
+    def has_rows(page: int) -> bool:
+        html = _fetch_page(base_url.format(page=page))
+        rows = parse_fn(html) if html else []
+        return len(rows) > 0
+
+    # Ensure page 1 exists (if not, nothing to do)
+    if not has_rows(1):
+        return results
+
+    # Expand upper bound until we hit an empty page
+    while has_rows(hi):
+        lo = hi + 1
+        hi *= 2
+        if hi > 4000:
+            break  # sanity
+
+    # Binary search to find last page with rows
+    left, right = lo, hi
+    last_with_rows = 1
+    while left <= right:
+        mid = (left + right) // 2
+        if has_rows(mid):
+            last_with_rows = mid
+            left = mid + 1
+        else:
+            right = mid - 1
+
+    # Phase 2: fetch all pages 1..last_with_rows concurrently
+    pages = list(range(1, last_with_rows + 1))
+    with cf.ThreadPoolExecutor(max_workers=min(32, len(pages) or 1)) as ex:
+        futures = {ex.submit(_fetch_page, base_url.format(page=p)): p for p in pages}
+        for fut in cf.as_completed(futures):
+            html = fut.result()
+            if not html:
+                continue
+            rows = parse_fn(html)
+            results.extend(rows)
+
+    return results
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
+def scrape_ibbi_registry() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Scrape both registries, return (individuals_df, entities_df).
+    Cached 7 days to avoid accidental re-runs if Supabase is empty.
+    """
+    indiv_rows = _discover_and_fetch(INDIV_BASE, _parse_individuals)
+    ent_rows   = _discover_and_fetch(ENT_BASE, _parse_entities)
+
+    df_ind = pd.DataFrame(indiv_rows)
+    df_ent = pd.DataFrame(ent_rows)
+
+    # Normalize keys
+    if not df_ind.empty:
+        df_ind["reg_no"] = df_ind["reg_no"].astype(str).str.strip().str.upper()
+        df_ind["name"]   = df_ind["name"].astype(str).str.strip()
+    if not df_ent.empty:
+        df_ent["reg_no"] = df_ent["reg_no"].astype(str).str.strip().str.upper()
+        df_ent["name"]   = df_ent["name"].astype(str).str.strip()
+
+    return df_ind, df_ent
+
+def ensure_registry_available() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Try Supabase first; if empty, scrape once and upsert to Supabase.
+    """
+    ind = _sb_load_registry("ibbi_rv_individuals")
+    ent = _sb_load_registry("ibbi_rv_entities")
+    if not ind.empty or not ent.empty:
+        return ind, ent
+
+    # One-time scrape
+    with st.spinner("Building local IBBI registry cache (first run)…"):
+        ind, ent = scrape_ibbi_registry()
+        if not ind.empty:
+            _sb_upsert("ibbi_rv_individuals", ind.to_dict("records"))
+        if not ent.empty:
+            _sb_upsert("ibbi_rv_entities", ent.to_dict("records"))
+    return ind, ent
+
+# ------------------------------------------------------------
+# Valuation sheet load + business rules
+# ------------------------------------------------------------
+
+@st.cache_data(show_spinner=False, ttl=60 * 30)
+def load_valuation_sheet(url: str) -> pd.DataFrame:
+    # Your sheet says data is on Sheet1
+    try:
+        df = load_table_url(url, sheet="Sheet1")
+    except TypeError:
+        # if your load_table_url has a different signature, try without name
+        df = load_table_url(url)
+
+    # Standardize columns expected:
+    # Name of REIT | Finanical Year | Name of Valuer | Date of Appointmnet | Date of Resignation | IBBI Registration No.
+    # Fix common typos
+    rename_map = {
+        "Finanical Year": "Financial Year",
+        "Date of Appointmnet": "Date of Appointment",
+        "IBBI Registration No.": "IBBI Registration No",
+    }
+    for a, b in rename_map.items():
+        if a in df.columns and b not in df.columns:
+            df[b] = df[a]
 
     expected = [
         "Name of REIT",
-        "Finanical Year",
+        "Financial Year",
         "Name of Valuer",
-        "Date of Appointmnet",
+        "Date of Appointment",
         "Date of Resignation",
-        "IBBI Registration No.",
+        "IBBI Registration No",
     ]
-    for col in expected:
-        if col not in df.columns:
-            df[col] = pd.NA
+    keep = [c for c in expected if c in df.columns]
+    return df[keep].copy() if keep else pd.DataFrame(columns=expected)
 
-    df["Date of Appointmnet"] = df["Date of Appointmnet"].apply(_parse_date)
-    df["Date of Resignation"] = df["Date of Resignation"].apply(_parse_date)
-
-    return df
-
-# ------------------------------------------------------------
-# IBBI registry scraping (auto-discover page counts)
-# ------------------------------------------------------------
-def _extract_table_rows(tbl: BeautifulSoup) -> List[Dict[str, str]]:
-    headers: List[str] = []
-    rows: List[Dict[str, str]] = []
-    thead = tbl.find("thead")
-    if thead:
-        headers = [th.get_text(strip=True) for th in thead.find_all("th")]
-    tbody = tbl.find("tbody")
-    if not tbody:
-        return rows
-    for tr in tbody.find_all("tr"):
-        tds = tr.find_all("td")
-        if not tds:
+def _parse_date(s: object) -> Optional[date]:
+    if s is None:
+        return None
+    t = str(s).strip()
+    if not t or t.upper() in {"NA", "N/A", "NONE", "-"}:
+        return None
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(t, fmt).date()
+        except ValueError:
             continue
-        values = [td.get_text(strip=True) for td in tds]
-        if headers and len(values) == len(headers):
-            row = {headers[i]: values[i] for i in range(len(headers))}
-        else:
-            row = {f"col_{i}": values[i] for i in range(len(values))}
-        rows.append(row)
-    return rows
-
-def _parse_registry_html(html_text: str, kind: str) -> List[Dict[str, str]]:
-    soup = BeautifulSoup(html_text, "lxml")
-    rows_all: List[Dict[str, str]] = []
-    for tbl in soup.find_all("table"):
-        rows_all.extend(_extract_table_rows(tbl))
-    normed: List[Dict[str, str]] = []
-    for r in rows_all:
-        keys = {k.lower(): k for k in r.keys()}
-        reg_key = (
-            keys.get("registration no.")
-            or keys.get("registration no")
-            or keys.get("reg. no.")
-            or keys.get("reg no.")
-        )
-        name_key = keys.get("name of rv") or keys.get("name of rve") or keys.get("name")
-        if reg_key and name_key:
-            normed.append(
-                {
-                    "source": kind,
-                    "Registration No.": r.get(reg_key, "").strip(),
-                    "Name": r.get(name_key, "").strip(),
-                }
-            )
-    return normed
-
-def _fetch_page(session: requests.Session, url_tpl: str, page: int) -> Tuple[int, Optional[str]]:
+    # last attempt: pandas
     try:
-        r = session.get(url_tpl.format(page=page), timeout=25)
-        if r.status_code == 200 and "<html" in r.text.lower():
-            return page, r.text
-        return page, None
-    except Exception:
-        return page, None
-
-def _discover_last_valid_page(
-    session: requests.Session,
-    url_tpl: str,
-    kind_for_parse: str,
-    start: int = 1,
-    window: int = 30,
-    max_page: int = 2000,
-) -> int:
-    """Walk in windows until a window has no tables. Return last valid page, 0 if none."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    last_valid = 0
-    p = start
-    while p <= max_page:
-        batch = list(range(p, min(p + window - 1, max_page) + 1))
-        with ThreadPoolExecutor(max_workers=min(len(batch), 32)) as ex:
-            futs = [ex.submit(_fetch_page, session, url_tpl, i) for i in batch]
-            any_valid = False
-            for fut in as_completed(futs):
-                page, html_text = fut.result()
-                if not html_text:
-                    continue
-                rows = _parse_registry_html(html_text, kind_for_parse)
-                if rows:
-                    any_valid = True
-                    if page > last_valid:
-                        last_valid = page
-        if not any_valid:
-            break
-        p = batch[-1] + 1
-    return last_valid
-
-def _scrape_ibbi_registry_full() -> pd.DataFrame:
-    """Auto-discover + fetch all pages concurrently, returns normalized df."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    session = _http_session(pool=64)
-    ind_last = _discover_last_valid_page(session, INDIVIDUAL_BASE, "individual")
-    ent_last = _discover_last_valid_page(session, ENTITY_BASE, "entity")
-
-    total_pages = ind_last + ent_last
-    rows_normed: List[Dict[str, str]] = []
-
-    if total_pages == 0:
-        return pd.DataFrame(columns=["source", "Registration No.", "Name", "norm_name", "reg_norm"])
-
-    prog = st.progress(0.0, text=f"Fetching IBBI registry (pages: {ind_last} + {ent_last})…")
-    done = 0
-
-    with ThreadPoolExecutor(max_workers=min(total_pages, 64)) as ex:
-        futs = []
-        for p in range(1, ind_last + 1):
-            futs.append(ex.submit(_fetch_page, session, INDIVIDUAL_BASE, p))
-        for p in range(1, ent_last + 1):
-            futs.append(ex.submit(_fetch_page, session, ENTITY_BASE, p))
-
-        for fut in as_completed(futs):
-            page, html_text = fut.result()
-            if html_text:
-                kind = "individual" if page <= ind_last else "entity"
-                rows_normed.extend(_parse_registry_html(html_text, kind))
-            done += 1
-            prog.progress(done / max(total_pages, 1))
-
-    prog.empty()
-    df = pd.DataFrame(rows_normed)
-    if df.empty:
-        return df
-
-    df["norm_name"] = df["Name"].map(_normalize_name)
-    df["reg_norm"]  = df["Registration No."].str.replace(r"\s+", "", regex=True).str.upper()
-    df.drop_duplicates(subset=["source", "reg_norm", "norm_name"], inplace=True)
-    return df[["source", "Registration No.", "Name", "norm_name", "reg_norm"]].reset_index(drop=True)
-
-# ------------------------------------------------------------
-# Supabase helpers
-# ------------------------------------------------------------
-def _get_supabase() -> Optional[Client]:
-    try:
-        url = st.secrets["supabase"]["url"]
-        key = st.secrets["supabase"].get("service_key") or st.secrets["supabase"]["anon_key"]
-        if not create_client:
+        d = pd.to_datetime(t, dayfirst=True, errors="coerce")
+        if pd.isna(d):
             return None
-        return create_client(url, key)  # type: ignore
+        return d.date()
     except Exception:
         return None
 
-@st.cache_data(ttl=24 * 60 * 60)
-def supabase_read_registry() -> pd.DataFrame:
-    sb = _get_supabase()
-    if not sb:
-        return pd.DataFrame()
-    try:
-        resp = sb.table("ibbi_registry").select("*").execute()
-        data = resp.data or []
-        df = pd.DataFrame(data)
-        if df.empty:
-            return df
-        # harmonize
-        if "Registration No." not in df.columns and "registration_no" in df.columns:
-            df.rename(columns={"registration_no": "Registration No."}, inplace=True)
-        if "Name" not in df.columns and "name" in df.columns:
-            df.rename(columns={"name": "Name"}, inplace=True)
-        if "norm_name" not in df.columns:
-            df["norm_name"] = df["Name"].map(_normalize_name)
-        if "reg_norm" not in df.columns:
-            df["reg_norm"] = df["Registration No."].astype(str).str.replace(r"\s+", "", regex=True).str.upper()
-        return df[["source", "Registration No.", "Name", "norm_name", "reg_norm"]]
-    except Exception:
-        return pd.DataFrame()
+def _fy_end(fy: str) -> Optional[date]:
+    """
+    "2024-25" -> 31-Mar-2025 ; "2019-20" -> 31-Mar-2020
+    """
+    m = re.match(r"^\s*(\d{4})\s*[-/]\s*(\d{2})\s*$", str(fy).strip())
+    if not m:
+        return None
+    start = int(m.group(1))
+    end_year = start + 1
+    return date(end_year, 3, 31)
 
-def supabase_replace_registry(df: pd.DataFrame) -> bool:
-    """Deletes table and re-inserts df. Requires service_key."""
-    sb = _get_supabase()
-    if not sb:
-        return False
-    try:
-        # Ensure we’re using service key (writes)
-        sb.table("ibbi_registry").delete().neq("reg_norm", "").execute()
-        # Insert in chunks
-        recs = df.to_dict(orient="records")
-        chunk = 1000
-        for i in range(0, len(recs), chunk):
-            sb.table("ibbi_registry").upsert(recs[i:i+chunk], on_conflict="source,reg_norm,norm_name").execute()
-        return True
-    except Exception:
-        return False
+def _tenure_days(start_dt: Optional[date], end_dt: Optional[date]) -> Optional[int]:
+    if not start_dt or not end_dt:
+        return None
+    return (end_dt - start_dt).days
 
-# ------------------------------------------------------------
-# Business rules
-# ------------------------------------------------------------
-def check_tenure_leq_4yrs(
-    appoint: Optional[pd.Timestamp],
-    resign: Optional[pd.Timestamp],
-) -> Tuple[bool, Optional[float]]:
-    if isinstance(appoint, pd.Timestamp):
-        end_dt = resign if isinstance(resign, pd.Timestamp) else pd.Timestamp(date.today())
-        yrs = _years_between(appoint, end_dt)
-        return yrs <= 4.0, yrs
-    return False, None
+def _normalize_name(s: str) -> str:
+    return re.sub(r"[\s\W]+", " ", (s or "")).strip().upper()
 
-def check_ibbi_registered(name: str, reg_no: str, registry: pd.DataFrame) -> bool:
-    if registry is None or registry.empty:
-        return False
-    reg_norm = (reg_no or "").replace(" ", "").upper()
-    if reg_norm and (registry["reg_norm"] == reg_norm).any():
-        return True
-    nm = _normalize_name(name or "")
-    if not nm:
-        return False
-    return (registry["norm_name"] == nm).any()
+def match_in_registry(reg_no: str, valuer_name: str,
+                      ind: pd.DataFrame, ent: pd.DataFrame) -> Tuple[bool, str]:
+    """
+    Try to match first by reg_no; if not present, fallback to name match.
+    Returns (is_registered, matched_kind: 'Individual'|'Entity'|'' )
+    """
+    rn = (reg_no or "").strip().upper()
+    nm = _normalize_name(valuer_name)
+
+    if rn:
+        if not ind.empty and rn in set(ind["reg_no"]):
+            return True, "Individual"
+        if not ent.empty and rn in set(ent["reg_no"]):
+            return True, "Entity"
+
+    if nm:
+        if not ind.empty and nm in set(_normalize_name(n) for n in ind["name"].astype(str).tolist()):
+            return True, "Individual"
+        if not ent.empty and nm in set(_normalize_name(n) for n in ent["name"].astype(str).tolist()):
+            return True, "Entity"
+
+    return False, ""
+
+def evaluate_rows(df: pd.DataFrame,
+                  ibbi_ind: pd.DataFrame,
+                  ibbi_ent: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute:
+      - tenure_end (resignation if present else FY end)
+      - tenure_days / tenure_years
+      - tenure_ok (≤ 4 years)
+      - ibbi_registered (match in individuals or entities)
+    """
+    if df.empty:
+        return df
+
+    out = df.copy()
+    out["Appointment Date"] = out["Date of Appointment"].map(_parse_date)
+    out["Resignation Date"] = out["Date of Resignation"].map(_parse_date)
+
+    # tenure end = resignation if available, else FY end
+    out["FY End"] = out["Financial Year"].map(_fy_end)
+    out["Tenure End"] = out.apply(
+        lambda r: r["Resignation Date"] if pd.notna(r["Resignation Date"]) else r["FY End"],
+        axis=1
+    )
+
+    out["Tenure (days)"] = out.apply(
+        lambda r: _tenure_days(r["Appointment Date"], r["Tenure End"]), axis=1
+    )
+    out["Tenure (years)"] = out["Tenure (days)"].map(lambda d: round(d / 365.25, 2) if pd.notna(d) else None)
+    out["Tenure ≤ 4 years"] = out["Tenure (days)"].map(lambda d: bool(d is not None and d <= 4 * 365.25))
+
+    def _ibbi(row) -> Tuple[bool, str]:
+        return match_in_registry(
+            str(row.get("IBBI Registration No", "")),
+            str(row.get("Name of Valuer", "")),
+            ibbi_ind, ibbi_ent
+        )
+
+    reg = out.apply(_ibbi, axis=1)
+    out["IBBI Registered?"] = [t[0] for t in reg]
+    out["Matched Type"] = [t[1] for t in reg]
+
+    # Friendly statuses
+    out["Tenure Status"] = out["Tenure ≤ 4 years"].map(lambda x: "✅ OK" if x else "❌ > 4 years")
+    out["IBBI Status"]   = out["IBBI Registered?"].map(lambda x: "✅ Found in registry" if x else "❌ Not found")
+
+    return out
 
 # ------------------------------------------------------------
 # UI
 # ------------------------------------------------------------
-def render() -> None:
+
+def render():
     st.header("Valuation")
 
-    # --- Sidebar: only Segment + Data URL (as requested) ---
+    inject_global_css()
+
+    # Sidebar: Segment & data URL only (clean)
     with st.sidebar:
-        seg = st.selectbox("Select Segment", ["REIT", "InvIT"], index=0)
-        sheet_url = st.text_input(
-            "Data URL (public Google Sheet)",
-            value=DEFAULT_SHEET_URL,
-            help="Public view link; Sheet1 should contain the valuer rows.",
-        )
+        st.subheader("Select Segment")
+        seg = st.radio("Segment", ["REIT", "InvIT"], index=0, label_visibility="collapsed")
+        st.caption("Data Source (Google Sheet – public view)")
+        st.code(DEFAULT_VALUATION_URL or "(not set in utils/common.py)", language="text")
 
-    if not sheet_url:
-        st.warning("Please provide a public Google Sheet URL in the sidebar.")
+    if seg != "REIT":
+        st.info("Valuation checks for InvIT will be added similarly. Currently enabled for REIT.")
         return
 
-    # Load valuation rows
-    val_df = load_valuers_sheet(sheet_url)
-    if val_df.empty:
-        st.info("No valuation records found in Sheet1.")
+    # Load valuation sheet
+    if not DEFAULT_VALUATION_URL:
+        st.error("VALUATION_REIT_SHEET_URL is not configured in utils/common.py")
         return
 
-    # Filters
-    reits = sorted([x for x in val_df["Name of REIT"].dropna().unique().tolist() if str(x).strip()])
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        selected_reit = st.selectbox("Select REIT", reits, index=0 if reits else None)
-    with c2:
-        fy_opts = (
-            val_df.loc[val_df["Name of REIT"] == selected_reit, "Finanical Year"]
-            .dropna().astype(str).unique().tolist()
-        )
-        fy_opts = sorted(fy_opts)
-        selected_fy = st.selectbox("Financial Year", fy_opts, index=0 if fy_opts else None)
-
-    filtered = val_df[
-        (val_df["Name of REIT"] == selected_reit)
-        & (val_df["Finanical Year"].astype(str) == str(selected_fy))
-    ].copy()
-
-    if filtered.empty:
-        st.warning("No rows for the selected REIT and year.")
+    df_raw = load_valuation_sheet(DEFAULT_VALUATION_URL)
+    if df_raw.empty:
+        st.warning("No valuation rows found in Sheet1. Please check columns and sharing.")
         return
 
-    # ---------- Registry source (Supabase first, fallback to scrape) ----------
-    registry = supabase_read_registry()
-    used_supabase = not registry.empty
+    # Entity & FY selectors (main area)
+    cols = st.columns([2, 1, 1, 1])
+    ent_list = sorted(df_raw["Name of REIT"].dropna().unique().tolist())
+    fy_list  = sorted(df_raw["Financial Year"].dropna().unique().tolist())
 
-    if registry.empty:
-        with st.spinner("No Supabase registry found. Building once from IBBI (auto-discover)…"):
-            registry = _scrape_ibbi_registry_full()
-            if not registry.empty:
-                # Try to persist if service_key exists
-                if supabase_replace_registry(registry):
-                    used_supabase = True
+    entity = cols[0].selectbox("Entity", ent_list, index=0)
+    fy     = cols[1].selectbox("Financial Year", ["All"] + fy_list, index=0)
 
-    # Optional maintenance control (NOT in sidebar)
-    with st.expander("IBBI Registry maintenance"):
-        if used_supabase:
-            st.success("Using Supabase cache.")
-        else:
-            st.warning("Using in-memory registry (Supabase unavailable or empty).")
-
-        if st.button("Full refresh from IBBI now (overwrite Supabase)"):
-            df_new = _scrape_ibbi_registry_full()
-            if df_new.empty:
-                st.error("Could not rebuild registry from IBBI.")
-            else:
-                ok = supabase_replace_registry(df_new)
-                if ok:
-                    supabase_read_registry.clear()  # clear 24h read cache
-                    st.success("Supabase registry overwritten.")
-                else:
-                    st.warning("Supabase write failed (service_key missing?). Registry kept in memory for this session.")
-
-    # Evaluate rows
-    out_rows: List[Dict[str, Any]] = []
-    for _, r in filtered.iterrows():
-        name   = str(r.get("Name of Valuer", "")).strip()
-        regno  = str(r.get("IBBI Registration No.", "")).strip()
-        appoint = r.get("Date of Appointmnet")
-        resign  = r.get("Date of Resignation")
-
-        ok_tenure, yrs = check_tenure_leq_4yrs(appoint, resign)
-        ok_reg    = check_ibbi_registered(name, regno, registry)
-
-        out_rows.append(
-            {
-                "Name of REIT": r.get("Name of REIT"),
-                "Financial Year": r.get("Finanical Year"),
-                "Valuer": name,
-                "IBBI Reg No.": regno,
-                "Appointment": appoint.date().isoformat() if isinstance(appoint, pd.Timestamp) else "",
-                "Resignation": resign.date().isoformat() if isinstance(resign, pd.Timestamp) else "",
-                "Tenure ≤ 4 years": "✅" if ok_tenure else "❌",
-                "Tenure (yrs)": f"{yrs:.2f}" if yrs is not None else "",
-                "Registered with IBBI": "✅" if ok_reg else "❌",
-            }
+    # Minimal maintenance (not in sidebar): refresh registry if you need to
+    with st.expander("Maintenance (optional)"):
+        st.markdown(
+            "- Registry source: IBBI (Individuals & Entities). "
+            "App reads from Supabase first; if empty, it will scrape once and cache/upsert."
         )
+        run_refresh = st.button("Force refresh IBBI registry now (scrape & upsert)")
+        if run_refresh:
+            ind, ent = scrape_ibbi_registry()
+            if not ind.empty:
+                _sb_upsert("ibbi_rv_individuals", ind.to_dict("records"))
+            if not ent.empty:
+                _sb_upsert("ibbi_rv_entities", ent.to_dict("records"))
+            st.success(f"Refreshed: {len(ind)} individual rows, {len(ent)} entity rows.")
 
-    res_df = pd.DataFrame(out_rows)
+    # Get registry (Supabase first; if empty, scrape once)
+    ibbi_ind, ibbi_ent = ensure_registry_available()
 
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric("Rows analysed", len(res_df))
-    with m2:
-        st.metric("Tenure OK (≤ 4 yrs)", int((res_df["Tenure ≤ 4 years"] == "✅").sum()))
-    with m3:
-        st.metric("Registered with IBBI", int((res_df["Registered with IBBI"] == "✅").sum()))
+    # Filter the valuation rows
+    q = df_raw[df_raw["Name of REIT"] == entity].copy()
+    if fy != "All":
+        q = q[q["Financial Year"] == fy]
 
-    st.dataframe(res_df, use_container_width=True, hide_index=True)
+    if q.empty:
+        st.info("No rows for the selected filters.")
+        return
+
+    # Evaluate checks
+    eval_df = evaluate_rows(q, ibbi_ind, ibbi_ent)
+
+    # Present results
+    st.markdown("### Results")
+    base_cols = [
+        "Name of REIT",
+        "Financial Year",
+        "Name of Valuer",
+        "IBBI Registration No",
+        "Date of Appointment",
+        "Date of Resignation",
+        "Tenure (years)",
+        "Tenure Status",
+        "IBBI Status",
+        "Matched Type",
+    ]
+
+    # Show a compact summary table
+    show_cols = [c for c in base_cols if c in eval_df.columns]
+    st.dataframe(
+        eval_df[show_cols].sort_values(["Financial Year", "Name of Valuer"], na_position="last"),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # Alerts (red) for any breaches
+    bre_tenure = eval_df[~eval_df["Tenure ≤ 4 years"].fillna(True)]
+    bre_ibbi   = eval_df[~eval_df["IBBI Registered?"].fillna(True)]
+
+    if not bre_tenure.empty or not bre_ibbi.empty:
+        st.markdown("### Alerts")
+    if not bre_tenure.empty:
+        st.error(f"Tenure > 4 years: {len(bre_tenure)} row(s).")
+        st.dataframe(bre_tenure[show_cols], use_container_width=True, hide_index=True)
+    if not bre_ibbi.empty:
+        st.error(f"IBBI registration not found: {len(bre_ibbi)} row(s).")
+        st.dataframe(bre_ibbi[show_cols], use_container_width=True, hide_index=True)
+
+# Streamlit page entry point (if imported by pages/7_Valuation.py)
+def render_valuation():
+    render()
