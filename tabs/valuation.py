@@ -353,11 +353,7 @@ def evaluate_rows(df: pd.DataFrame, ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFra
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def load_valuation_timelines_sheet(url: str, gid: str) -> pd.DataFrame:
-    # Explicitly load using GID if possible to target Sheet2
-    # Ensure URL is constructed with the correct GID
     if "docs.google.com" in url:
-        # We assume the base URL might point to a different sheet, 
-        # so we strip parameters and add the correct GID for Sheet2.
         base = re.sub(r"/edit.*", "", url).strip()
         csv_url = f"{base}/export?format=csv&gid={gid}"
         try:
@@ -365,41 +361,37 @@ def load_valuation_timelines_sheet(url: str, gid: str) -> pd.DataFrame:
             return df
         except Exception:
             return pd.DataFrame()
-    
-    # Fallback to load_table_url if it's not a standard edit link
     return load_table_url(url, gid=int(gid))
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def load_fundraising_data(url: str) -> pd.DataFrame:
     df = load_table_url(url)
     df = _standardize_selector_columns(df)
-    # Parse dates immediately
     date_col = _find_col(df.columns, aliases=["Date of Fund raising", "Date of Fund Raising"])
     if date_col:
         df["FundDate"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
     return df
 
-def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    if df.empty: return pd.DataFrame(), pd.DataFrame()
+def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if df.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
     out = df.copy()
-    
-    # Standardize column names based on user input
-    # Expected: "Date of valuation report from valuer", "Date of submission of Valuation Report to Trustee", 
-    # "Date of disclosure of NAV to the Stock Exchanges", "Date of Discloure of valuation report to the stock exchanges"
     
     col_report = "Date of valuation report from valuer"
     col_trustee = "Date of submission of Valuation Report to Trustee"
     col_nav = "Date of disclosure of NAV to the Stock Exchanges"
-    col_discl = "Date of Discloure of valuation report to the stock exchanges"
     
+    # Handle spelling variation in "Disclosure"
+    col_discl = "Date of Discloure of valuation report to the stock exchanges"
+    if col_discl not in out.columns:
+        # Try correct spelling
+        col_discl = "Date of Disclosure of valuation report to the stock exchanges"
+
     # Parse dates
     for c in [col_report, col_trustee, col_nav, col_discl]:
         if c in out.columns:
             out[c + "_dt"] = pd.to_datetime(out[c], dayfirst=True, errors="coerce")
     
-    alerts = []
-
     # --- Checks 1, 2, 3: Timelines (15 days) ---
     def calc_delay(row, start_col, end_col, label):
         s = row.get(start_col + "_dt")
@@ -408,7 +400,8 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
             diff = (e - s).days
             if diff > 15:
                 return f"❌ {diff} days ({label})"
-        return "✅ OK"
+            return f"✅ {diff} days" # Show days even for pass
+        return "-"
 
     if col_report + "_dt" in out.columns:
         if col_trustee + "_dt" in out.columns:
@@ -419,46 +412,31 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
             out["Check: Report Disclosure"] = out.apply(lambda r: calc_delay(r, col_report, col_discl, "Report"), axis=1)
 
     # --- Checks 4 & 5: Frequency Completeness ---
-    # Group by REIT and FY
-    if "Name of REIT" in out.columns and "Financial Year" in out.columns:
-        grouped = out.groupby(["Name of REIT", "Financial Year"])
+    grouped = out.groupby(["Name of REIT", "Financial Year"])
+    freq_alerts = []
+    
+    for (reit, fy), group in grouped:
+        has_annual = False
+        if "Frequency" in group.columns and group["Frequency"].str.contains("Annual", case=False, na=False).any(): has_annual = True
+        if "Period Ended" in group.columns and group["Period Ended"].str.contains("Mar", case=False, na=False).any(): has_annual = True
         
-        freq_alerts = []
-        for (reit, fy), group in grouped:
-            # Check for Annual/March
-            has_annual = False
-            if "Frequency" in group.columns:
-                if group["Frequency"].str.contains("Annual", case=False, na=False).any(): has_annual = True
-            if "Period Ended" in group.columns:
-                if group["Period Ended"].str.contains("Mar", case=False, na=False).any(): has_annual = True
-            
-            # Check for Half-Year/Sept
-            has_half = False
-            if "Frequency" in group.columns:
-                if group["Frequency"].str.contains("Half", case=False, na=False).any(): has_half = True
-            if "Period Ended" in group.columns:
-                if group["Period Ended"].str.contains("Sept", case=False, na=False).any(): has_half = True
-                if group["Period Ended"].str.contains("Sep", case=False, na=False).any(): has_half = True
-            
-            if not has_annual:
-                freq_alerts.append({"Name of REIT": reit, "Financial Year": fy, "Issue": "Missing Annual/March Valuation"})
-            if not has_half:
-                freq_alerts.append({"Name of REIT": reit, "Financial Year": fy, "Issue": "Missing Half-Year/Sept Valuation"})
+        has_half = False
+        if "Frequency" in group.columns and group["Frequency"].str.contains("Half", case=False, na=False).any(): has_half = True
+        if "Period Ended" in group.columns and (group["Period Ended"].str.contains("Sept", case=False, na=False).any() or group["Period Ended"].str.contains("Sep", case=False, na=False).any()): has_half = True
         
-        df_freq_alerts = pd.DataFrame(freq_alerts)
-    else:
-        df_freq_alerts = pd.DataFrame()
+        if not has_annual:
+            freq_alerts.append({"Name of REIT": reit, "Financial Year": fy, "Issue": "Missing Annual/March Valuation"})
+        if not has_half:
+            freq_alerts.append({"Name of REIT": reit, "Financial Year": fy, "Issue": "Missing Half-Year/Sept Valuation"})
+    
+    df_freq_alerts = pd.DataFrame(freq_alerts)
 
     # --- Check 6: Fundraising Correlation ---
-    fund_alerts = []
+    fund_checks = []
     if not fund_df.empty and col_report + "_dt" in out.columns and "Name of REIT" in out.columns:
-        # Filter fundraising for post-initial offer
-        # Logic: Exclude "Initial Offer" or "IPO". 
-        # We look for "Type of Issue" column in fund_df.
         type_col = _find_col(fund_df.columns, aliases=["Type of Issue"])
         
         if type_col and "FundDate" in fund_df.columns:
-            # Filter rows where type is NOT IPO
             post_ipo_fund = fund_df[~fund_df[type_col].astype(str).str.contains("Initial", case=False, na=False)].copy()
             
             for idx, f_row in post_ipo_fund.iterrows():
@@ -466,44 +444,41 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
                 if pd.isna(f_date): continue
                 
                 f_entity = str(f_row.get(ENT_COL, "")).strip()
-                
-                # Find matching valuation rows for this entity
-                # Fuzzy matching entity names can be hard, assume approximate match or clean match
-                # We use simple string containment or equality after normalization
-                
-                # Get valuation dates for this entity
-                # Normalize names for comparison
                 val_rows = out[out["Name of REIT"].apply(_norm_name) == _norm_name(f_entity)]
                 
                 if val_rows.empty:
-                    # Try partial match if exact failed
                     val_rows = out[out["Name of REIT"].str.contains(f_entity[:10], case=False, na=False)]
 
-                found_valid_val = False
-                
-                # 6-month window logic: 
-                # Valuation must be between (FundDate - 180 days) and (FundDate)
+                # 6-month window logic
                 start_window = f_date - timedelta(days=180)
                 
+                # Find the LATEST valid valuation report in that window
                 valid_vals = val_rows[
                     (val_rows[col_report + "_dt"] >= start_window) & 
                     (val_rows[col_report + "_dt"] <= f_date)
-                ]
+                ].sort_values(col_report + "_dt", ascending=False)
+                
+                status = "❌ Fail"
+                last_val_date = None
+                days_prior = None
                 
                 if not valid_vals.empty:
-                    found_valid_val = True
+                    status = "✅ Pass"
+                    last_val_date = valid_vals.iloc[0][col_report + "_dt"]
+                    days_prior = (f_date - last_val_date).days
                 
-                if not found_valid_val:
-                    fund_alerts.append({
-                        "Name of REIT": f_entity,
-                        "Fundraising Date": f_date.date(),
-                        "Issue Type": f_row.get(type_col, "-"),
-                        "Alert": "No Valuation Report found within 6 months prior to fund raising"
-                    })
+                fund_checks.append({
+                    "Name of REIT": f_entity,
+                    "Fundraising Date": f_date.date(),
+                    "Issue Type": f_row.get(type_col, "-"),
+                    "Latest Valuation Date": last_val_date.date() if last_val_date else "Not Found",
+                    "Days Prior": days_prior if days_prior is not None else "-",
+                    "Status": status
+                })
     
-    df_fund_alerts = pd.DataFrame(fund_alerts)
+    df_fund_checks = pd.DataFrame(fund_checks)
 
-    return out, df_freq_alerts, df_fund_alerts
+    return out, df_freq_alerts, df_fund_checks
 
 # ------------------------------------------------------------
 # UI
@@ -515,14 +490,12 @@ def render():
     with st.sidebar:
         st.subheader("Select Segment")
         seg = st.radio("Segment", ["REIT", "InvIT"], index=0, label_visibility="collapsed")
-        
         st.divider()
         st.caption("Data Sources")
         st.text("1. Valuer Details (Sheet1)")
         st.code(DEFAULT_VALUATION_URL or "Not Configured", language="text")
         st.text("2. Compliance Data (Sheet2)")
         st.code(f"...gid={VALUATION_TIMELINE_GID}", language="text")
-        
         st.divider()
         st.subheader("Registry Controls")
         force_refresh = st.button("🔄 Refresh IBBI Registry Data", help="Scrape latest data from ibbi.gov.in and update Supabase.")
@@ -535,7 +508,6 @@ def render():
         st.error("VALUATION_REIT_SHEET_URL is not configured in utils/common.py")
         return
 
-    # --- TABS ---
     tab_registry, tab_compliance = st.tabs(["Valuer Details & Tenure", "Timelines & Compliance"])
 
     # ========================== TAB 1: Valuer Details ==========================
@@ -544,20 +516,16 @@ def render():
         if df_raw.empty:
             st.warning("No valuation rows found in Sheet1.")
         else:
-            # Filters
             c1, c2 = st.columns([2, 1], vertical_alignment="center")
             ent_list = sorted(df_raw["Name of REIT"].dropna().unique().tolist())
             fy_list  = sorted(df_raw["Financial Year"].dropna().unique().tolist())
-
             entity = c1.selectbox("Entity", ent_list, index=0, key="val_ent_1")
             fy     = c2.selectbox("Financial Year", ["All"] + fy_list, index=0, key="val_fy_1")
 
-            # Fetch registry
             ibbi_ind, ibbi_ent = _ensure_registry(force_refresh=force_refresh)
             if force_refresh:
                 st.success(f"Registry updated! Found {len(ibbi_ind)} individuals and {len(ibbi_ent)} entities.")
 
-            # Filter rows
             q = df_raw[df_raw["Name of REIT"] == entity].copy()
             if fy != "All":
                 q = q[q["Financial Year"] == fy]
@@ -565,24 +533,16 @@ def render():
             if q.empty:
                 st.info("No rows for the selected filters.")
             else:
-                # Evaluate
                 eval_df = evaluate_rows(q, ibbi_ind, ibbi_ent)
-
                 st.markdown("### Results")
                 view_cols = ["Name of REIT", "Financial Year", "Name of Valuer", "IBBI Registration No", 
                              "Date of Appointment", "Date of Resignation", "Tenure (years)", 
                              "Tenure Status", "IBBI Status", "Matched Type"]
                 show_cols = [c for c in view_cols if c in eval_df.columns]
-                
-                st.dataframe(
-                    eval_df[show_cols].sort_values(["Financial Year", "Name of Valuer"], na_position="last"),
-                    use_container_width=True,
-                    hide_index=True
-                )
+                st.dataframe(eval_df[show_cols].sort_values(["Financial Year", "Name of Valuer"], na_position="last"), use_container_width=True, hide_index=True)
 
                 breaches_tenure = eval_df[~eval_df["Tenure ≤ 4 years"].fillna(True)]
                 breaches_ibbi   = eval_df[~eval_df["IBBI Registered?"].fillna(True)]
-
                 if not breaches_tenure.empty or not breaches_ibbi.empty:
                     st.markdown("### Alerts")
                     if not breaches_tenure.empty:
@@ -600,70 +560,43 @@ def render():
         if df_time.empty:
             st.warning("Could not load Sheet2 (Timelines Data). Please check the Sheet GID.")
         else:
-            # Filters
             c1, c2 = st.columns([2, 1], vertical_alignment="center")
             ent_list_t = sorted(df_time["Name of REIT"].dropna().unique().tolist())
             fy_list_t  = sorted(df_time["Financial Year"].dropna().unique().tolist())
-
             entity_t = c1.selectbox("Entity", ["All"] + ent_list_t, index=0, key="val_ent_2")
             fy_t     = c2.selectbox("Financial Year", ["All"] + fy_list_t, index=0, key="val_fy_2")
 
-            # Filter logic
             q_time = df_time.copy()
-            if entity_t != "All":
-                q_time = q_time[q_time["Name of REIT"] == entity_t]
-            if fy_t != "All":
-                q_time = q_time[q_time["Financial Year"] == fy_t]
+            if entity_t != "All": q_time = q_time[q_time["Name of REIT"] == entity_t]
+            if fy_t != "All": q_time = q_time[q_time["Financial Year"] == fy_t]
 
-            # Run Checks
-            checked_df, freq_alerts, fund_alerts = check_timelines_and_completeness(q_time, df_fund)
+            checked_df, freq_alerts, fund_checks = check_timelines_and_completeness(q_time, df_fund)
             
-            # --- Display 1: Timeline Checks (15 days) ---
             st.subheader("1. Submission & Disclosure Timelines (Max 15 days)")
+            st.caption("Includes Check 3: Date of valuation report vs Date of Disclosure to stock exchanges.")
             
-            # Identify columns to show
             base_cols = ["Name of REIT", "Financial Year", "Frequency", "Period Ended", "Date of valuation report from valuer"]
             check_cols = [c for c in checked_df.columns if c.startswith("Check:")]
             
-            # Filter to show rows with errors primarily, or all? 
-            # Let's show all but highlight errors.
             if not checked_df.empty:
-                # Custom styling for dataframe to highlight errors? 
-                # Streamlit dataframe supports simplistic styling. 
-                # We will filter for display.
+                st.dataframe(checked_df[base_cols + check_cols], use_container_width=True, hide_index=True)
                 
-                st.dataframe(
-                    checked_df[base_cols + check_cols],
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # Alerts for Timelines
                 err_mask = False
-                for c in check_cols:
-                    err_mask |= checked_df[c].astype(str).str.contains("❌")
-                
+                for c in check_cols: err_mask |= checked_df[c].astype(str).str.contains("❌")
                 timeline_errors = checked_df[err_mask]
                 if not timeline_errors.empty:
                     st.error(f"Found {len(timeline_errors)} timeline violations.")
                     st.dataframe(timeline_errors[base_cols + check_cols], use_container_width=True, hide_index=True)
-                else:
-                    st.success("No timeline violations found for selected filters.")
+            else:
+                st.info("No data for timeline checks.")
 
             st.divider()
 
-            # --- Display 2: Frequency Checks ---
             st.subheader("2. Valuation Frequency Checks")
-            st.caption("Ensuring 'Annual/Mar' and 'Half-Year/Sept' valuations exist for each FY.")
-            
-            # Filter freq_alerts by selection
             if not freq_alerts.empty:
                 f_alerts_show = freq_alerts.copy()
-                if entity_t != "All":
-                    f_alerts_show = f_alerts_show[f_alerts_show["Name of REIT"] == entity_t]
-                if fy_t != "All":
-                    f_alerts_show = f_alerts_show[f_alerts_show["Financial Year"] == fy_t]
-                
+                if entity_t != "All": f_alerts_show = f_alerts_show[f_alerts_show["Name of REIT"] == entity_t]
+                if fy_t != "All": f_alerts_show = f_alerts_show[f_alerts_show["Financial Year"] == fy_t]
                 if not f_alerts_show.empty:
                     st.error(f"Found {len(f_alerts_show)} missing valuation reports.")
                     st.dataframe(f_alerts_show, use_container_width=True, hide_index=True)
@@ -674,23 +607,24 @@ def render():
 
             st.divider()
 
-            # --- Display 3: Fundraising Correlation ---
             st.subheader("3. Fundraising vs. Valuation")
-            st.caption("Ensuring a valuation report exists within 6 months prior to any post-IPO fundraising.")
+            st.caption("Proof Table: Checking for a valuation report within 6 months prior to each post-IPO fundraising event.")
             
-            if not fund_alerts.empty:
-                 # Filter fund_alerts by selection (only Entity applies here really)
-                fund_alerts_show = fund_alerts.copy()
-                if entity_t != "All":
-                    fund_alerts_show = fund_alerts_show[fund_alerts_show["Name of REIT"] == entity_t]
+            if not fund_checks.empty:
+                f_checks_show = fund_checks.copy()
+                if entity_t != "All": f_checks_show = f_checks_show[f_checks_show["Name of REIT"] == entity_t]
                 
-                if not fund_alerts_show.empty:
-                    st.error(f"Found {len(fund_alerts_show)} fundraising events without recent valuation.")
-                    st.dataframe(fund_alerts_show, use_container_width=True, hide_index=True)
+                # Show full table of evidence
+                st.dataframe(f_checks_show, use_container_width=True, hide_index=True)
+                
+                # Show alerts if any failures
+                failures = f_checks_show[f_checks_show["Status"].str.contains("Fail")]
+                if not failures.empty:
+                    st.error(f"Found {len(failures)} fundraising events without valid prior valuations.")
                 else:
-                    st.success("All fundraising events have valid prior valuations.")
+                    st.success("All fundraising events compliant.")
             else:
-                st.success("All fundraising events have valid prior valuations.")
+                st.info("No post-IPO fundraising data found to check.")
 
 def render_valuation():
     render()
