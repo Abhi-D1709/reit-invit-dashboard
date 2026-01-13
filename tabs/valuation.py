@@ -491,8 +491,6 @@ def render():
         st.subheader("Select Segment")
         seg = st.radio("Segment", ["REIT", "InvIT"], index=0, label_visibility="collapsed")
         st.divider()
-        st.caption("Data Sources")
-        st.divider()
         st.subheader("Registry Controls")
         force_refresh = st.button("🔄 Refresh IBBI Registry Data", help="Scrape latest data from ibbi.gov.in and update Supabase.")
 
