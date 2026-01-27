@@ -40,6 +40,9 @@ GOVERNANCE_REIT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ETx5UZKQQyZ
 # Valuation Data (REITs) – Public view link
 VALUATION_REIT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1dujQ1XpnorGgXvmrlSjWuBkQFGifnC39sqbG98W9TrQ/edit?usp=sharing"
 
+# Related Party Transactions (REITs)
+RPT_REIT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1zn1XtA1DHF0VANTkowFZqenUUDSISlz1LFscT8SI-yM/edit?usp=sharing"
+
 # Canonical internal names
 ENT_COL = "__Entity__"
 FY_COL  = "__FinancialYear__"
