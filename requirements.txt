@@ -8,3 +8,4 @@ beautifulsoup4
 lxml
 supabase>=2.4,<3
 python-dateutil
+openpyxl
