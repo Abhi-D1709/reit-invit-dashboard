@@ -28,7 +28,7 @@ def clean_currency(x):
 @st.cache_data(ttl=600, show_spinner="Loading Related Party Data...")
 def load_rpt_data():
     """
-    Loads Sheet1, Sheet2, Sheet3 from the RPT Google Sheet
+    Loads Sheet1, Sheet2, Sheet3, Sheet4 from the RPT Google Sheet
     AND the Borrowings data for Asset Value lookups.
     """
     # 1. Load RPT Sheets via Excel export
@@ -68,6 +68,7 @@ def render():
     df_s1 = sheets.get("Sheet1", pd.DataFrame())
     df_s2 = sheets.get("Sheet2", pd.DataFrame())
     df_s3 = sheets.get("Sheet3", pd.DataFrame())
+    df_s4 = sheets.get("Sheet4", pd.DataFrame())
 
     if df_s1.empty:
         st.warning("Sheet1 data is empty.")
@@ -78,7 +79,7 @@ def render():
         
         # Extract unique Entities (Combine from all relevant sheets)
         entities = set()
-        for df in [df_s1, df_s2, df_s3]:
+        for df in [df_s1, df_s2, df_s3, df_s4]:
             if "Name of REIT" in df.columns:
                 entities.update(df["Name of REIT"].dropna().astype(str).unique())
             
@@ -216,3 +217,47 @@ def render():
     else:
         if df_s3.empty: st.info("Sheet3 data is empty.")
         if borrowings_df.empty: st.error("Borrowings data could not be loaded.")
+
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # SECTION 4: Sheet 4 Analysis (Lease Transactions)
+    # -------------------------------------------------------------------------
+    st.subheader("4. Lease Transactions")
+    
+    if not df_s4.empty and "Name of REIT" in df_s4.columns:
+        # Filter Logic for Sheet 4
+        mask_s4 = df_s4["Name of REIT"] == selected_entity
+        
+        # Note: Sheet 4 typically does not have a Financial Year column in the sample,
+        # but if it does, we respect the filter.
+        if selected_fy != "All" and "Financial Year" in df_s4.columns:
+            mask_s4 &= df_s4["Financial Year"].astype(str) == str(selected_fy)
+            
+        df4_filtered = df_s4[mask_s4].copy()
+        
+        # Check Column H: "If Yes, Date of Untiholder Approval"
+        # "If yes [entry exists], then Red alert, else green."
+        target_col = "If Yes, Date of Untiholder Approval"
+        
+        if target_col in df4_filtered.columns:
+            # Display the data first
+            st.dataframe(df4_filtered, use_container_width=True, hide_index=True)
+            
+            # Check for non-empty entries in Column H
+            has_entry = (
+                df4_filtered[target_col].notna() & 
+                (df4_filtered[target_col].astype(str).str.strip() != "") & 
+                (df4_filtered[target_col].astype(str).str.strip() != "-")
+            ).any()
+            
+            if has_entry:
+                st.error("Alert: Unitholder Approval entry found (Column H).")
+            else:
+                st.success("No Unitholder Approval entries found (Column H).")
+        else:
+            st.warning(f"Column '{target_col}' not found in Sheet4.")
+            # Fallback: Just show the table if column missing
+            st.dataframe(df4_filtered, use_container_width=True, hide_index=True)
+    else:
+        st.info("No data available in Sheet4.")
