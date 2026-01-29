@@ -177,16 +177,61 @@ def render():
         st.error(f"Could not read the URL. Make sure it’s publicly accessible.\n\nDetails: {e}"); st.stop()
 
     with st.sidebar:
-        st.divider()
-        entity = multiselect_with_select_all(
-            "Entity", sorted(df[ENT_COL].dropna().astype(str).unique()), key=f"entity_{segment}", default_all=False,
-            help="Use “Select all” at the top to include every entity.",
+            st.divider()
+            
+            # Entity Selection
+            all_entities = sorted(df[ENT_COL].dropna().astype(str).unique())
+            entity = multiselect_with_select_all(
+                "Entity", 
+                all_entities, 
+                key=f"ent_{segment}", 
+                default_all=False
+            )
+            
+            # Financial Year Selection (Dependent on Entity)
+            # FIX: Use .isin(entity)
+            if entity:
+                available_fys = sorted(df.loc[df[ENT_COL].isin(entity), FY_COL].dropna().astype(str).unique())
+            else:
+                available_fys = []
+                
+            fy = multiselect_with_select_all(
+                "Financial Year", 
+                available_fys, 
+                key=f"fy_{segment}", 
+                default_all=False
+            )
+            
+            # Quarter Selection (Dependent on Entity + FY)
+            # FIX: Use .isin(entity) and .isin(fy)
+            if entity and fy:
+                qtr_present = df.loc[
+                    (df[ENT_COL].isin(entity)) & (df[FY_COL].isin(fy)), 
+                    QTR_COL
+                ].dropna().astype(str).unique()
+                available_qtrs = _quarter_sort(qtr_present)
+            else:
+                available_qtrs = []
+
+            qtr = multiselect_with_select_all(
+                "Quarter", 
+                available_qtrs, 
+                key=f"qtr_{segment}", 
+                default_all=False
+            )
+
+    # 2. Main Data Filtering
+    # FIX: Use .isin() for all filters
+    if not (entity and fy and qtr):
+            st.info("Please select Entity, Financial Year, and Quarter to view data.")
+            return
+
+    mask = (
+            (df[ENT_COL].isin(entity)) & 
+            (df[FY_COL].isin(fy)) & 
+            (df[QTR_COL].isin(qtr))
         )
-        fy = multiselect_with_select_all("Financial Year", sorted(df.loc[df[ENT_COL].isin(entity), FY_COL].dropna().astype(str).unique()), key=f"fy_{segment}", default_all=False)
-        qtr_present = df.loc[(df[ENT_COL] == entity) & (df[FY_COL] == fy), QTR_COL].dropna().astype(str).unique().tolist()
-        qtr = multiselect_with_select_all("Quarter", _quarter_sort(qtr_present), key=f"qtr_{segment}", default_all=False)
-    
-    row_df = df[(df[ENT_COL] == entity) & (df[FY_COL] == fy) & (df[QTR_COL] == qtr)]
+    row_df = df[mask].copy()
     if row_df.empty: st.warning("No data found for the selected filters."); st.stop()
     row = row_df.iloc[0]
 
