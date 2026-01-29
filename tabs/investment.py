@@ -83,6 +83,8 @@ def render():
 
     # 1. Asset Ratio Check
     st.subheader("1. Investment in Completed Assets (≥ 80%)")
+    st.caption("Rules: Target ≥ 80% (Green). **Exception:** Red Alert if ratio is between 81% and 85%.")
+    
     if c_col and u_col:
         def check_80_rule(row):
             val_c = clean_currency(row[c_col])
@@ -105,13 +107,16 @@ def render():
 
         filtered["Asset Ratio Check"] = filtered.apply(check_80_rule, axis=1)
         cols_1 = ["Name of REIT", "Financial Year", c_col, u_col, "Asset Ratio Check"]
-        # Convert to string to avoid Arrow errors
+        
         st.dataframe(filtered[cols_1].astype(str), use_container_width=True, hide_index=True)
         
-        if filtered["Asset Ratio Check"].str.contains("🔴").any():
-            st.error("Alert: Investment ratio issues found.")
+        # Check if any row triggered the specific 81-85% warning
+        if filtered["Asset Ratio Check"].str.contains("81-85% Bracket").any():
+            st.error("Alert: Some investments fall within the 81-85% warning bracket.")
+        elif filtered["Asset Ratio Check"].str.contains("🔴").any():
+            st.error("Alert: Investment ratio below 80%.")
         else:
-            st.success("Asset Investment Ratios are healthy.")
+            st.success("Asset Investment Ratios are compliant (≥ 80% and outside warning bracket).")
     else:
         st.warning("Could not identify Columns C or U.")
 
