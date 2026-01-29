@@ -67,7 +67,7 @@ def load_borrowings_data(url: str) -> pd.DataFrame:
     df = load_table_url(url)
     return _process_borrowings_df(df)
 
-def render_borrow():
+def render():
     st.header("Borrowings")
     inject_global_css()
 
@@ -116,10 +116,6 @@ def render_borrow():
             fy_mask = ent_mask & (df[FY_COL].astype(str) == fy)
             available_qtrs = _quarter_sort(df.loc[fy_mask, QTR_COL].dropna().astype(str).unique())
         else:
-            # If All FYs selected, show all quarters available for this entity? 
-            # Or just "All"? Let's allow filtering by Quarter across years if desired, 
-            # or just reset to All. Usually specific Qtr makes sense only with specific FY.
-            # We'll allow All or specific quarters present in the whole dataset for this entity.
             available_qtrs = _quarter_sort(df.loc[ent_mask, QTR_COL].dropna().astype(str).unique())
 
         qtr = st.selectbox("Quarter", ["All"] + available_qtrs, key="borr_qtr")
@@ -143,9 +139,6 @@ def render_borrow():
         return
 
     # --- Display Logic ---
-    # If a specific row is pinpointed (Single FY + Single Quarter), show detailed metrics
-    # Otherwise (All FYs or All Quarters), show a summary table/chart.
-
     if fy != "All" and qtr != "All" and len(row_df) == 1:
         # --- Detailed View for a Single Quarter ---
         row = row_df.iloc[0]
@@ -185,11 +178,9 @@ def render_borrow():
         st.subheader(f"Trends: {entity}")
         
         # Chart: Borrowings vs Asset Value over time
-        # Create a label for the X-axis combining FY and Qtr for sorting
         chart_df = row_df.copy()
         chart_df["Period"] = chart_df[FY_COL].astype(str) + " - " + chart_df[QTR_COL].astype(str)
         
-        # Simple Bar Chart for Borrowings
         chart = (
             alt.Chart(chart_df).mark_bar().encode(
                 x=alt.X("Period", sort=None, title="Period"),
@@ -201,9 +192,7 @@ def render_borrow():
 
         # Data Table
         st.markdown("##### Data Records")
-        # Select clean columns to display
         display_cols = [FY_COL, QTR_COL]
-        # Add dynamic mapped cols
         cmap = df.attrs["__borr_cols__"]
         for k in ["borr", "cash", "val", "nbr"]:
             if cmap[k] and cmap[k] in row_df.columns:
