@@ -1,201 +1,211 @@
 # tabs/borrowings.py
 import pandas as pd
 import streamlit as st
-import altair as alt
-
 from utils.common import (
-    DEFAULT_REIT_BORR_URL,
-    DEFAULT_INVIT_BORR_URL,
-    ENT_COL, FY_COL, QTR_COL,
-    load_table_url,
-    _standardize_selector_columns,
-    _quarter_sort,
-    _find_col,
-    _num_series,
-    inject_global_css
+    ENT_COL, FY_COL, QTR_COL, EPS,
+    DEFAULT_REIT_BORR_URL, DEFAULT_INVIT_BORR_URL,
+    _to_date, _to_pct, _is_taken, _is_yes, _is_aaa,
+    _find_col, _num_series, _standardize_selector_columns, _quarter_sort,
+    _url, load_table_url
 )
 
-# --------------------------- Helpers ---------------------------
+# --- Constants for Business Logic ---
+INVIT_NBR_CAP = 0.70
+INVIT_AAA_THRESHOLD = 0.49
+CREDIT_RATING_THRESHOLD = 0.25
+REIT_NBR_THRESHOLD = 0.25
 
 def _process_borrowings_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Standardize columns, ensure numeric types for metrics.
-    """
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [c.strip() for c in df.columns]
     df = _standardize_selector_columns(df)
 
-    # Identify numeric columns using aliases
     cols = df.columns
-    borr_col = _find_col(cols, aliases=["Consolidated Borrowings", "Borrowings"])
-    def_col  = _find_col(cols, aliases=["Deferred Payments", "Deferred Payment"])
-    cash_col = _find_col(cols, aliases=["Cash and Cash Equivalents", "Cash & Cash Equivalents"])
-    val_col  = _find_col(cols, aliases=["Value of REIT Assets", "REIT Assets Value", "Asset Value"])
-    nbr_col  = _find_col(cols, aliases=["Net Borrowings Ratio (NBR)", "Net Borrowing Ratio"])
+    borrow_col = _find_col(cols, aliases=["Borrowings","A. Borrowings","A - Borrowings"], must_tokens=["borrow"])
+    defer_col  = _find_col(cols, aliases=["Deferred Payments","B. Deferred Payments"], must_tokens=["defer","payment"])
+    cash_col   = _find_col(cols, aliases=["Cash and Cash Equivalents","C. Cash and Cash Equivalents"], must_tokens=["cash","equivalent"])
+    assets_col = _find_col(cols, aliases=["Value of REIT Assets","D. Value of REIT Assets","Value of InvIT Assets"], must_tokens=["value","asset"])
 
-    # Create normalized numeric columns
-    df["Borrowings (num)"]        = _num_series(df, borr_col)
-    df["Deferred Payments (num)"] = _num_series(df, def_col, fill=0.0)
-    df["Cash (num)"]              = _num_series(df, cash_col, fill=0.0)
-    df["Asset Value (num)"]       = _num_series(df, val_col)
-    
-    # NBR is often a string "14.83%". Convert to float 14.83
+    A = _num_series(df, borrow_col, 0.0)
+    B = _num_series(df, defer_col, 0.0)
+    C = _num_series(df, cash_col, 0.0)
+    D = _num_series(df, assets_col, pd.NA).replace(0, pd.NA)
+
+    nbr_col = _find_col(cols, aliases=["Net Borrowings Ratio (NBR)"], must_tokens=["borrow","ratio","nbr"])
     if nbr_col:
-        # Remove % and convert
-        df["NBR (num)"] = pd.to_numeric(
-            df[nbr_col].astype(str).str.replace("%", "", regex=False), 
-            errors='coerce'
-        )
-    else:
-        df["NBR (num)"] = pd.Series([float('nan')] * len(df))
+        df["NBR_ratio"] = df[nbr_col].apply(_to_pct)
 
-    # Store original column names for display
-    df.attrs["__borr_cols__"] = {
-        "borr": borr_col,
-        "def": def_col,
-        "cash": cash_col,
-        "val": val_col,
-        "nbr": nbr_col,
-        "rating1": _find_col(cols, aliases=["Credit Rating CRA1", "Rating 1"]),
-        "agency1": _find_col(cols, aliases=["Name of CRA1", "Agency 1"]),
-        "rating2": _find_col(cols, aliases=["Credit Rating CRA2", "Rating 2"]),
-        "agency2": _find_col(cols, aliases=["Name of CRA2", "Agency 2"]),
+    if "NBR_ratio" not in df.columns or df["NBR_ratio"].isna().any():
+        computed = (A.add(B, fill_value=0).sub(C, fill_value=0)) / D
+        df["NBR_ratio"] = df.get("NBR_ratio", computed).fillna(computed)
+
+    for col in ["Date of Publishing Credit Rating CRA1", "Date of Publishing Credit Rating CRA2", "Date of meeting for Unitholder Approval", "Date Of intimation to Trustee"]:
+        if col in df.columns:
+            df[f"{col} (fmt)"] = df[col].apply(_to_date)
+
+    df.attrs["__matched_cols__"] = {
+        "Borrowings": borrow_col, "Deferred Payments": defer_col,
+        "Cash and Cash Equivalents": cash_col, "Value of REIT/Trust Assets": assets_col,
+        "NBR source": nbr_col or "computed",
     }
     return df
 
 @st.cache_data(show_spinner=False, ttl=300)
-def load_borrowings_data(url: str) -> pd.DataFrame:
+def load_borrowings_url(url: str) -> pd.DataFrame:
     df = load_table_url(url)
     return _process_borrowings_df(df)
 
+def _render_card_breakup(row, m):
+    a_label = m.get("Borrowings") or "Borrowings"
+    b_label = m.get("Deferred Payments") or "Deferred Payments"
+    c_label = m.get("Cash and Cash Equivalents") or "Cash and Cash Equivalents"
+    d_label = m.get("Value of REIT/Trust Assets") or "Value of REIT Assets"
+    st.markdown(f"""
+        **Breakup**
+        - **A. Borrowings**: {row.get(a_label, "-")}
+        - **B. Deferred Payments**: {row.get(b_label, "-")}
+        - **C. Cash and Cash Equivalents**: {row.get(c_label, "-")}
+        - **D. Value of REIT Assets**: {row.get(d_label, "-")}
+    """)
+
+def _alerts_and_sections(row, ruleset: str):
+    nbr = row.get("NBR_ratio", None)
+    if not isinstance(nbr, (int, float)) or pd.isna(nbr):
+        st.info("NBR not available. Compliance sections cannot be displayed.")
+        return False
+
+    if ruleset == "invit":
+        if nbr > INVIT_NBR_CAP + EPS:
+            st.error(f"ALERT: NBR is {float(nbr)*100:.2f}% which exceeds the {INVIT_NBR_CAP*100:.0f}% cap for InvITs.")
+        show_sections = (nbr > CREDIT_RATING_THRESHOLD + EPS)
+    else: # reit
+        show_sections = (nbr >= REIT_NBR_THRESHOLD - EPS)
+
+    if not show_sections:
+        st.info("NBR is below the threshold. Credit Rating and Unitholder Approval sections are not required.")
+        return False
+    return True
+
+def _check_compliance_alerts(row, ruleset: str):
+    cols = row.index
+    cra1_rating = row.get(_find_col(cols, aliases=["Credit Rating CRA1"]))
+    cra2_rating = row.get(_find_col(cols, aliases=["Credit Rating CRA2"]))
+    ua_col = _find_col(cols, must_tokens=["unitholder", "approval"], exclude_tokens=["date", "meeting", "weblink"])
+    unitholder_approval_val = row.get(ua_col)
+
+    credit_taken_any = _is_taken(cra1_rating) or _is_taken(cra2_rating)
+    aaa_ok = _is_aaa(cra1_rating) or _is_aaa(cra2_rating)
+    unit_taken = _is_yes(unitholder_approval_val)
+
+    missing = []
+    nbr = row.get("NBR_ratio", 0.0) or 0.0
+    if ruleset == "invit":
+        if nbr > INVIT_AAA_THRESHOLD + EPS:
+            if not aaa_ok: missing.append("AAA Credit Rating")
+            if not unit_taken: missing.append("Unitholder Approval")
+        elif nbr > CREDIT_RATING_THRESHOLD + EPS:
+            if not credit_taken_any: missing.append("Credit Rating")
+            if not unit_taken: missing.append("Unitholder Approval")
+    else: # reit
+        if not credit_taken_any: missing.append("Credit Rating")
+        if not unit_taken: missing.append("Unitholder Approval")
+
+    if missing:
+        msg = f"Both {missing[0]} and {missing[1]} are not taken/available." if len(missing) == 2 else f"{missing[0]} is not taken/available."
+        st.error(f"ALERT: {msg} for this period.")
+
+def _render_credit_rating_ui(row):
+    cols = row.index
+    st.markdown("### Credit Rating")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**CRA1**")
+        rating = row.get(_find_col(cols, aliases=["Credit Rating CRA1"]))
+        st.write(f"**Rating**: {rating if _is_taken(rating) else '-'}")
+        st.write(f"**Name**: {row.get(_find_col(cols, aliases=['Name of CRA1']), '-')}")
+        st.write(f"**Date**: {row.get(_find_col(cols, aliases=['Date of Publishing Credit Rating CRA1 (fmt)']), '-')}")
+        link = _url(row.get(_find_col(cols, aliases=['Weblink of CRA1 Disclosure (CRA/Exchange)'])))
+        if link: st.markdown(f"**Disclosure Link**: [View Document]({link})")
+    with c2:
+        st.markdown("**CRA2**")
+        rating = row.get(_find_col(cols, aliases=["Credit Rating CRA2"]))
+        st.write(f"**Rating**: {rating if _is_taken(rating) else '-'}")
+        st.write(f"**Name**: {row.get(_find_col(cols, aliases=['Name of CRA2']), '-')}")
+        st.write(f"**Date**: {row.get(_find_col(cols, aliases=['Date of Publishing Credit Rating CRA2 (fmt)']), '-')}")
+        link = _url(row.get(_find_col(cols, aliases=['Weblink of CRA2 Disclosure (CRA/Exchange)'])))
+        if link: st.markdown(f"**Disclosure Link**: [View Document]({link})")
+    st.markdown("---")
+
+
+def _render_unitholder_and_compliances_ui(row):
+    cols = row.index
+    st.markdown("### Unitholder Approval & Compliances")
+
+    # Unitholder Approval part
+    ua_col = _find_col(cols, must_tokens=["unitholder", "approval"], exclude_tokens=["date", "meeting", "weblink"])
+    ua_val = row.get(ua_col)
+    approval_display = "Yes" if _is_yes(ua_val) else ("No" if _is_taken(ua_val) else "-")
+    st.write(f"**Unitholder Approval Taken**: {approval_display}")
+    st.write(f"**Date of meeting**: {row.get('Date of meeting for Unitholder Approval (fmt)', '-')}")
+
+    # ** THIS IS THE CORRECTED LINK LOGIC **
+    link_col = _find_col(cols, must_tokens=["weblink", "unitholder"])
+    link = _url(row.get(link_col))
+    if link:
+        st.markdown(f"**Disclosure Link**: [View Document]({link})")
+
+    # Additional Compliances part
+    st.write(f"**Whether NBR > 25% due to market movement?** {row.get('Whether NBR>25% on account of market movement?', '-')}")
+    st.write(f"**Date of intimation to Trustee**: {row.get('Date Of intimation to Trustee (fmt)', '-')}")
+
+
 def render():
     st.header("Borrowings")
-    inject_global_css()
-
-    # --- Sidebar: Segment Selection ---
     with st.sidebar:
-        segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_borr")
-    
-    # Auto-select URL (Hidden from UI)
-    data_url = DEFAULT_INVIT_BORR_URL if segment == "InvIT" else DEFAULT_REIT_BORR_URL
+        segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_borrow")
+        # compute the default URL after segment is chosen
+        default_url = DEFAULT_INVIT_BORR_URL if segment == "InvIT" else DEFAULT_REIT_BORR_URL
 
-    if not data_url:
-        st.warning("Data URL not configured.")
-        return
+        data_url = st.text_input(
+            "Data URL",
+            value=default_url,
+            key=f"fund_url_{segment}",
+        )
+        data_url = data_url.strip()
+
+    if not data_url.strip():
+        st.warning("Please provide a data URL."); st.stop()
 
     try:
-        df = load_borrowings_data(data_url)
+        df = load_borrowings_url(data_url.strip())
     except Exception as e:
-        st.error(f"Failed to load data: {e}")
-        return
+        st.error(f"Could not read the URL. Make sure it’s publicly accessible.\n\nDetails: {e}"); st.stop()
 
-    if df.empty:
-        st.warning("Data loaded but empty.")
-        return
+    # Filters
+    c1, c2, c3 = st.columns(3)
+    with c1: entity = st.selectbox("Entity", sorted(df[ENT_COL].dropna().astype(str).unique()), key=f"entity_{segment}")
+    with c2: fy = st.selectbox("Financial Year", sorted(df.loc[df[ENT_COL] == entity, FY_COL].dropna().astype(str).unique()), key=f"fy_{segment}")
+    with c3:
+        qtr_present = df.loc[(df[ENT_COL] == entity) & (df[FY_COL] == fy), QTR_COL].dropna().astype(str).unique().tolist()
+        qtr = st.selectbox("Quarter", _quarter_sort(qtr_present), key=f"qtr_{segment}")
 
-    # --- Sidebar: Filters (Single Select) ---
-    with st.sidebar:
-        st.divider()
-        
-        # 1. Entity (Single Select)
-        entities = sorted(df[ENT_COL].dropna().astype(str).unique())
-        if not entities:
-            st.warning("No entities found.")
-            return
-            
-        entity = st.selectbox("Entity", entities, key="borr_ent")
+    row_df = df[(df[ENT_COL] == entity) & (df[FY_COL] == fy) & (df[QTR_COL] == qtr)]
+    if row_df.empty: st.warning("No data found for the selected filters."); st.stop()
+    row = row_df.iloc[0]
 
-        # 2. Financial Year (Dependent on Entity)
-        # Filter df temporarily to find relevant FYs
-        ent_mask = df[ENT_COL] == entity
-        available_fys = sorted(df.loc[ent_mask, FY_COL].dropna().astype(str).unique())
-        
-        fy = st.selectbox("Financial Year", ["All"] + available_fys, key="borr_fy")
+    # KPI + Breakup
+    colA, colB = st.columns([0.9, 1.1])
+    with colA:
+        nbr = row.get("NBR_ratio", None)
+        nbr_display = "-" if pd.isna(nbr) else f"{float(nbr)*100:.2f}%"
+        st.markdown(f'<div class="kpi">📊 <b>Net Borrowings Ratio</b><br><span class="kpi-value">{nbr_display}</span></div>', unsafe_allow_html=True)
+        if isinstance(nbr, (int, float)) and not pd.isna(nbr): st.progress(min(max(float(nbr), 0.0), 1.0))
+    with colB:
+        _render_card_breakup(row, df.attrs.get("__matched_cols__", {}))
 
-        # 3. Quarter (Dependent on Entity + FY)
-        if fy != "All":
-            fy_mask = ent_mask & (df[FY_COL].astype(str) == fy)
-            available_qtrs = _quarter_sort(df.loc[fy_mask, QTR_COL].dropna().astype(str).unique())
-        else:
-            available_qtrs = _quarter_sort(df.loc[ent_mask, QTR_COL].dropna().astype(str).unique())
+    st.markdown("---")
 
-        qtr = st.selectbox("Quarter", ["All"] + available_qtrs, key="borr_qtr")
-
-    # --- Main Content Filtering ---
-    # Start with Entity mask
-    mask = (df[ENT_COL] == entity)
-
-    # Apply FY filter
-    if fy != "All":
-        mask &= (df[FY_COL].astype(str) == fy)
-
-    # Apply Quarter filter
-    if qtr != "All":
-        mask &= (df[QTR_COL].astype(str) == qtr)
-
-    row_df = df[mask].copy()
-
-    if row_df.empty:
-        st.info(f"No data found for {entity} matching the selected filters.")
-        return
-
-    # --- Display Logic ---
-    if fy != "All" and qtr != "All" and len(row_df) == 1:
-        # --- Detailed View for a Single Quarter ---
-        row = row_df.iloc[0]
-        
-        st.subheader(f"Snapshot: {fy} | {qtr}")
-        
-        # 1. Top Metrics
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Gross Borrowings", f"₹ {row.get('Borrowings (num)', 0):,.0f}")
-        c2.metric("Cash & Equiv.", f"₹ {row.get('Cash (num)', 0):,.0f}")
-        c3.metric("Net Borrowings Ratio", f"{row.get('NBR (num)', 0)}%")
-        c4.metric("Asset Value", f"₹ {row.get('Asset Value (num)', 0):,.0f}")
-
-        st.divider()
-
-        # 2. Credit Ratings
-        st.markdown("##### Credit Ratings")
-        cols_map = df.attrs["__borr_cols__"]
-        
-        # Extract ratings safely
-        r1 = row.get(cols_map["rating1"], "-")
-        a1 = row.get(cols_map["agency1"], "-")
-        r2 = row.get(cols_map["rating2"], "-")
-        a2 = row.get(cols_map["agency2"], "-")
-
-        rc1, rc2 = st.columns(2)
-        with rc1:
-            st.info(f"**{a1}**\n\n{r1}")
-        with rc2:
-            if str(a2).strip() not in ["-", "nan", "None", ""]:
-                st.info(f"**{a2}**\n\n{r2}")
-            else:
-                st.caption("No second rating agency listed.")
-
-    else:
-        # --- Trend View (Multiple rows) ---
-        st.subheader(f"Trends: {entity}")
-        
-        # Chart: Borrowings vs Asset Value over time
-        chart_df = row_df.copy()
-        chart_df["Period"] = chart_df[FY_COL].astype(str) + " - " + chart_df[QTR_COL].astype(str)
-        
-        chart = (
-            alt.Chart(chart_df).mark_bar().encode(
-                x=alt.X("Period", sort=None, title="Period"),
-                y=alt.Y("Borrowings (num)", title="Borrowings"),
-                tooltip=[FY_COL, QTR_COL, "Borrowings (num)", "NBR (num)"]
-            ).properties(height=300)
-        )
-        st.altair_chart(chart, use_container_width=True)
-
-        # Data Table
-        st.markdown("##### Data Records")
-        display_cols = [FY_COL, QTR_COL]
-        cmap = df.attrs["__borr_cols__"]
-        for k in ["borr", "cash", "val", "nbr"]:
-            if cmap[k] and cmap[k] in row_df.columns:
-                display_cols.append(cmap[k])
-        
-        st.dataframe(row_df[display_cols], use_container_width=True, hide_index=True)
+    ruleset = "invit" if segment == "InvIT" else "reit"
+    if _alerts_and_sections(row, ruleset):
+        _check_compliance_alerts(row, ruleset)
+        _render_credit_rating_ui(row)
+        _render_unitholder_and_compliances_ui(row)
