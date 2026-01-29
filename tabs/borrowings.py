@@ -182,7 +182,7 @@ def render():
             "Entity", sorted(df[ENT_COL].dropna().astype(str).unique()), key=f"entity_{segment}", default_all=False,
             help="Use “Select all” at the top to include every entity.",
         )
-        fy = multiselect_with_select_all("Financial Year", sorted(df.loc[df[ENT_COL] == entity, FY_COL].dropna().astype(str).unique()), key=f"fy_{segment}", default_all=False)
+        fy = multiselect_with_select_all("Financial Year", sorted(df.loc[df[ENT_COL].isin(entity), FY_COL].dropna().astype(str).unique()), key=f"fy_{segment}", default_all=False)
         qtr_present = df.loc[(df[ENT_COL] == entity) & (df[FY_COL] == fy), QTR_COL].dropna().astype(str).unique().tolist()
         qtr = multiselect_with_select_all("Quarter", _quarter_sort(qtr_present), key=f"qtr_{segment}", default_all=False)
     
