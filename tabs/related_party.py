@@ -28,7 +28,7 @@ def clean_currency(x):
 @st.cache_data(ttl=600, show_spinner="Loading Related Party Data...")
 def load_rpt_data():
     """
-    Loads Sheet1, Sheet2, Sheet3, Sheet4, Sheet5 from the RPT Google Sheet
+    Loads Sheet1 to Sheet6 from the RPT Google Sheet
     AND the Borrowings data for Asset Value lookups.
     """
     # 1. Load RPT Sheets via Excel export
@@ -70,6 +70,7 @@ def render():
     df_s3 = sheets.get("Sheet3", pd.DataFrame())
     df_s4 = sheets.get("Sheet4", pd.DataFrame())
     df_s5 = sheets.get("Sheet5", pd.DataFrame())
+    df_s6 = sheets.get("Sheet6", pd.DataFrame())
 
     if df_s1.empty:
         st.warning("Sheet1 data is empty.")
@@ -80,7 +81,7 @@ def render():
         
         # Extract unique Entities (Combine from all relevant sheets)
         entities = set()
-        for df in [df_s1, df_s2, df_s3, df_s4, df_s5]:
+        for df in [df_s1, df_s2, df_s3, df_s4, df_s5, df_s6]:
             if "Name of REIT" in df.columns:
                 entities.update(df["Name of REIT"].dropna().astype(str).unique())
             
@@ -88,7 +89,7 @@ def render():
 
         # Extract unique Financial Years (Combine from all relevant sheets)
         fys = set()
-        for df in [df_s1, df_s2, df_s3, df_s4, df_s5]:
+        for df in [df_s1, df_s2, df_s3, df_s4, df_s5, df_s6]:
             if "Financial Year" in df.columns:
                 fys.update(df["Financial Year"].dropna().astype(str).unique())
             
@@ -252,45 +253,31 @@ def render():
     st.caption("Condition: Value of Transaction <= 110% of Average (Valuation 1, Valuation 2)")
 
     if not df_s5.empty and "Name of REIT" in df_s5.columns:
-        # Filter Logic for Sheet 5
         mask_s5 = df_s5["Name of REIT"] == selected_entity
         if selected_fy != "All" and "Financial Year" in df_s5.columns:
             mask_s5 &= df_s5["Financial Year"].astype(str) == str(selected_fy)
             
         df5_filtered = df_s5[mask_s5].copy()
         
-        # Columns based on user input
         col_txn = "Value of Transaction"
         col_v1  = "Valuation 1 (INR Crores)"
         col_v2  = "Valuation 2 (INR Crores)"
         
         if all(c in df5_filtered.columns for c in [col_txn, col_v1, col_v2]):
-            
             def check_valuation(row):
                 txn_val = clean_currency(row[col_txn])
                 v1_val  = clean_currency(row[col_v1])
                 v2_val  = clean_currency(row[col_v2])
-                
-                # Calculate Average Valuation
                 avg_val = (v1_val + v2_val) / 2
-                
-                # Check 110% limit
-                # If avg_val is 0 (missing valuations), limit is 0, so any txn > 0 fails.
                 limit = avg_val * 1.10
-                
                 if txn_val <= limit:
                     return "Pass"
                 else:
                     return "Fail"
 
-            # Apply check if there is data
             if not df5_filtered.empty:
                 df5_filtered["Check Status"] = df5_filtered.apply(check_valuation, axis=1)
-                
-                # Display dataframe
                 st.dataframe(df5_filtered, use_container_width=True, hide_index=True)
-                
-                # Alert Logic
                 failures = df5_filtered[df5_filtered["Check Status"] == "Fail"]
                 if not failures.empty:
                     st.error(f"Alert: {len(failures)} transaction(s) exceed the 110% valuation limit.")
@@ -303,3 +290,39 @@ def render():
             st.dataframe(df5_filtered, use_container_width=True, hide_index=True)
     else:
         st.info("No data available in Sheet5.")
+
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # SECTION 6: Annual Report Disclosures
+    # -------------------------------------------------------------------------
+    st.subheader("6. Annual Report Disclosures")
+
+    if not df_s6.empty and "Name of REIT" in df_s6.columns:
+        mask_s6 = df_s6["Name of REIT"] == selected_entity
+        if selected_fy != "All" and "Financial Year" in df_s6.columns:
+            mask_s6 &= df_s6["Financial Year"].astype(str) == str(selected_fy)
+            
+        df6_filtered = df_s6[mask_s6].copy()
+        
+        # Cols requested: "Value of RPT > 5% of Value of REIT Assets", "Page No. of Annual Report on which it is disclosed"
+        target_cols = [
+            "Value of RPT > 5% of Value of REIT Assets",
+            "Page No. of Annual Report on which it is disclosed"
+        ]
+        
+        # Display specific columns if they exist
+        existing_cols = [c for c in target_cols if c in df6_filtered.columns]
+        
+        if not df6_filtered.empty:
+            # Optionally add FY for context if multiple years shown
+            display_cols = []
+            if "Financial Year" in df6_filtered.columns:
+                display_cols.append("Financial Year")
+            display_cols.extend(existing_cols)
+            
+            st.dataframe(df6_filtered[display_cols], use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No disclosure records found in {selected_fy} for {selected_entity}.")
+    else:
+        st.info("No data available in Sheet6.")
