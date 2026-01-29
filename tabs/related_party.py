@@ -3,137 +3,111 @@ import pandas as pd
 import streamlit as st
 from utils.common import (
     RPT_REIT_SHEET_URL,
-    inject_global_css
+    inject_global_css,
+    load_table_url
 )
 
-@st.cache_data(ttl=600, show_spinner="Loading Related Party Transactions...")
-def load_all_rpt_sheets():
+def load_sheet1_data():
     """
-    Loads the entire RPT workbook (all sheets) at once via Excel export.
-    This is more robust than guessing GIDs for Sheet1, Sheet2, etc.
+    Loads Sheet1 from the RPT Google Sheet.
     """
-    # Convert edit URL to export URL
-    xlsx_url = RPT_REIT_SHEET_URL.replace("/edit?usp=sharing", "/export?format=xlsx")
+    # Construct the CSV export URL for Sheet1 (gid=0 usually, or first sheet)
+    # We use the base URL from common.py and ensure we fetch the first sheet if GID not specified,
+    # or we can rely on pandas to fetch the first sheet by default if we use the export link.
+    
+    # Using the helper to ensure we get a CSV link
+    # If RPT_REIT_SHEET_URL is a standard edit link, we convert it.
+    url = RPT_REIT_SHEET_URL.replace("/edit?usp=sharing", "/export?format=csv&gid=0")
     
     try:
-        # Load all sheets as a dictionary of DataFrames
-        all_sheets = pd.read_excel(xlsx_url, sheet_name=None)
-        
-        # Clean up column names and empty rows for each sheet
-        cleaned = {}
-        for sheet_name, df in all_sheets.items():
-            # Standardize headers: strip whitespace
-            df.columns = [str(c).strip() for c in df.columns]
-            # Drop rows where all elements are NaN
-            df.dropna(how='all', inplace=True)
-            cleaned[sheet_name] = df
-            
-        return cleaned
+        df = pd.read_csv(url)
+        # Standardize columns: strip whitespace
+        df.columns = [str(c).strip() for c in df.columns]
+        # Drop completely empty rows
+        df.dropna(how='all', inplace=True)
+        return df
     except Exception as e:
-        st.error(f"Failed to load RPT Data: {e}")
-        return {}
+        st.error(f"Failed to load Sheet1: {e}")
+        return pd.DataFrame()
 
 def render():
     st.header("Related Party Transactions")
     inject_global_css()
 
-    # 1. Load All Data
-    sheets = load_all_rpt_sheets()
-    if not sheets:
+    # 1. Load Data
+    df_s1 = load_sheet1_data()
+    
+    if df_s1.empty:
+        st.warning("Sheet1 data could not be loaded or is empty.")
         return
-
-    # Extract specific sheets (defaulting to empty DF if missing)
-    df_s1 = sheets.get("Sheet1", pd.DataFrame())
-    df_s2 = sheets.get("Sheet2", pd.DataFrame())
 
     # 2. Sidebar Filters
     with st.sidebar:
         st.subheader("RPT Controls")
         
-        # Get Entities from Sheet1 or Sheet2
-        entities = set()
+        # Extract unique Entities
         if "Name of REIT" in df_s1.columns:
-            entities.update(df_s1["Name of REIT"].dropna().astype(str).unique())
-        if "Name of REIT" in df_s2.columns:
-            entities.update(df_s2["Name of REIT"].dropna().astype(str).unique())
+            entities = sorted(df_s1["Name of REIT"].dropna().astype(str).unique().tolist())
+        else:
+            entities = []
             
-        selected_entity = st.selectbox("Select Entity", sorted(list(entities)), key="rpt_entity")
+        selected_entity = st.selectbox("Select Entity", entities, key="rpt_entity")
 
-        # Get Financial Years from Sheet2 (Sheet1 usually doesn't have FY for all rows, but Sheet2 does)
-        fys = set()
-        if "Financial Year" in df_s2.columns:
-            fys.update(df_s2["Financial Year"].dropna().astype(str).unique())
+        # Extract unique Financial Years
+        # Note: We filter for non-null FYs to populate the dropdown
+        if "Financial Year" in df_s1.columns:
+            fys = sorted(df_s1["Financial Year"].dropna().astype(str).unique().tolist())
+        else:
+            fys = []
             
-        selected_fy = st.selectbox("Select Financial Year", ["All"] + sorted(list(fys)), key="rpt_fy")
+        selected_fy = st.selectbox("Select Financial Year", ["All"] + fys, key="rpt_fy")
 
     if not selected_entity:
         st.info("Please select an Entity from the sidebar.")
         return
 
-    # =========================================================================
-    # PART 1: Ceased Related Parties (Sheet 1)
-    # =========================================================================
+    # 3. Filter Logic for Sheet1
+    # "If for the selected entity, for the selected Financial Year..."
+    
+    # Filter by Entity
+    mask = df_s1["Name of REIT"] == selected_entity
+    
+    # Filter by Financial Year (if not All)
+    # We strictly enforce the FY check as requested
+    if selected_fy != "All":
+        if "Financial Year" in df_s1.columns:
+            # Convert both to string for safe comparison
+            mask &= df_s1["Financial Year"].astype(str) == str(selected_fy)
+    
+    filtered_df = df_s1[mask].copy()
+
+    # 4. Display Logic
+    # "If 'Relation Ceased with effect from' has any data..."
+    
     st.subheader("1. Ceased Related Parties")
     
-    if not df_s1.empty and "Name of REIT" in df_s1.columns:
-        # Filter by Entity
-        mask_s1 = df_s1["Name of REIT"] == selected_entity
+    ceased_col = "Relation Ceased with effect from"
+    reason_col = "Reason for Related Party Cease/Indentification (For Related Parties identifed/ceased post listing)"
+    
+    if ceased_col in filtered_df.columns:
+        # Check if ceased column has data (not null, not empty, not just a dash)
+        # We assume "-" might be used for active parties based on your example
+        is_ceased = (
+            filtered_df[ceased_col].notna() & 
+            (filtered_df[ceased_col].astype(str).str.strip() != "") & 
+            (filtered_df[ceased_col].astype(str).str.strip() != "-")
+        )
         
-        # Note: Sheet1 in your example sometimes has a 'Financial Year' column for specific events,
-        # but often lists static party details. If the column exists, we can filter, 
-        # but usually Ceased Date is the key. 
-        # We will filter by FY only if the column exists and user didn't select "All".
-        if selected_fy != "All" and "Financial Year" in df_s1.columns:
-             mask_s1 &= df_s1["Financial Year"].astype(str) == str(selected_fy)
-             
-        df1_filtered = df_s1[mask_s1].copy()
+        ceased_rows = filtered_df[is_ceased]
         
-        ceased_col = "Relation Ceased with effect from"
-        reason_col = "Reason for Related Party Cease/Indentification (For Related Parties identifed/ceased post listing)"
-        
-        if ceased_col in df1_filtered.columns:
-            # Check for non-empty cease dates
-            is_ceased = (
-                df1_filtered[ceased_col].notna() & 
-                (df1_filtered[ceased_col].astype(str).str.strip() != "") & 
-                (df1_filtered[ceased_col].astype(str).str.strip() != "-")
-            )
-            ceased_rows = df1_filtered[is_ceased]
-            
-            if not ceased_rows.empty:
-                cols_show = ["Name of Related Party", "Relation with the Related Party", ceased_col]
-                if reason_col in ceased_rows.columns:
-                    cols_show.append(reason_col)
-                st.dataframe(ceased_rows[cols_show], use_container_width=True, hide_index=True)
-            else:
-                st.info(f"No ceased related parties found for {selected_entity}.")
+        if not ceased_rows.empty:
+            # Display specific columns
+            cols_to_show = ["Name of Related Party", "Relation with the Related Party", ceased_col]
+            if reason_col in ceased_rows.columns:
+                cols_to_show.append(reason_col)
+                
+            st.dataframe(ceased_rows[cols_to_show], use_container_width=True, hide_index=True)
         else:
-            st.info("No ceased date column found in Sheet1.")
+            st.info(f"No related parties ceased in {selected_fy} for {selected_entity}.")
     else:
-        st.info("No data available in Sheet1.")
-
-    st.divider()
-
-    # =========================================================================
-    # PART 2: Unitholder Approvals (Sheet 2)
-    # =========================================================================
-    st.subheader("2. Unitholder Approvals")
-
-    if not df_s2.empty and "Name of REIT" in df_s2.columns:
-        # Filter by Entity
-        mask_s2 = df_s2["Name of REIT"] == selected_entity
-        
-        # Filter by FY
-        if selected_fy != "All" and "Financial Year" in df_s2.columns:
-            mask_s2 &= df_s2["Financial Year"].astype(str) == str(selected_fy)
-            
-        df2_filtered = df_s2[mask_s2].copy()
-        
-        # Requirement: "check whether any unitholder approval has been taken... If yes, red alert"
-        if not df2_filtered.empty:
-            st.error("Check this transaction further")
-            st.dataframe(df2_filtered, use_container_width=True, hide_index=True)
-        else:
-            st.success(f"No Unitholder Approvals found for {selected_entity} ({selected_fy}).")
-    else:
-        st.info("No data available in Sheet2.")
+        st.error(f"Column '{ceased_col}' not found in Sheet1 data.")
