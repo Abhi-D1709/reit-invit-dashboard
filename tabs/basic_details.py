@@ -194,13 +194,7 @@ def render():
             index=0,
             key="bd_segment"
         )
-        default_url = DEFAULT_REIT_DIR_URL if seg == "REIT" else DEFAULT_INVIT_DIR_URL
-        url = st.text_input(
-            "Data URL",
-            value=default_url or "",
-            placeholder="Paste a public Google Sheet URL…",
-            key=f"bd_url_{seg}"
-        )
+        url = DEFAULT_REIT_DIR_URL if seg == "REIT" else DEFAULT_INVIT_DIR_URL
 
     # ---- Sheet1: core directory ----
     try:
@@ -224,7 +218,7 @@ def render():
         return
 
     entities = [e for e in df1[ent_col].astype(str).fillna("").tolist() if e and e.strip() and e.strip() != "-"]
-    ent = st.selectbox("Choose entity", sorted(entities))
+    ent = st.sidebar.selectbox("Choose entity", sorted(entities))
 
     # Extract main (static) details from Sheet1
     row1 = df1.loc[df1[ent_col].astype(str) == ent]
@@ -343,7 +337,7 @@ def render():
     holdco_spvs_map: Dict[str, List[str]] = {}
 
     if fy_options:
-        fy = st.selectbox("Financial Year (for SPVs / HoldCos)", fy_options, index=0)
+        fy = st.sidebar.selectbox("Financial Year (for SPVs / HoldCos)", fy_options, index=0)
 
         m2 = _map_sheet2(df2_for_ent if not df2_for_ent.empty else df2)
         fy_col = next((c for c in m2["fy"] if c in (df2_for_ent.columns if not df2_for_ent.empty else df2.columns)), None)
