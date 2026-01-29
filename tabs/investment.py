@@ -87,15 +87,27 @@ def render():
         def check_80_rule(row):
             val_c = clean_currency(row[c_col])
             val_u = clean_currency(row[u_col])
+            
             if val_u == 0: return "N/A"
+            
             ratio = (val_c / val_u) * 100
-            if 81 <= ratio <= 85: return f"🔴 {ratio:.2f}% (Warning: In 81-85% Bracket)"
-            if ratio >= 80: return f"🟢 {ratio:.2f}% (Compliant)"
-            return f"🔴 {ratio:.2f}% (Non-Compliant: < 80%)"
+            
+            # Logic: Red alert if in 81-85% bracket
+            if 81 <= ratio <= 85:
+                return f"🔴 {ratio:.2f}% (Alert: In 81-85% Bracket)"
+            
+            # Logic: Green (No alert) if valid (>= 80% and NOT in 81-85%)
+            if ratio >= 80:
+                return f"🟢 {ratio:.2f}% (No alert)"
+            
+            # Logic: Red alert if < 80%
+            return f"🔴 {ratio:.2f}% (Alert: < 80%)"
 
         filtered["Asset Ratio Check"] = filtered.apply(check_80_rule, axis=1)
         cols_1 = ["Name of REIT", "Financial Year", c_col, u_col, "Asset Ratio Check"]
+        # Convert to string to avoid Arrow errors
         st.dataframe(filtered[cols_1].astype(str), use_container_width=True, hide_index=True)
+        
         if filtered["Asset Ratio Check"].str.contains("🔴").any():
             st.error("Alert: Investment ratio issues found.")
         else:
@@ -108,22 +120,30 @@ def render():
     # 2 & 3. SPV Checks
     st.subheader("2. SPV & Shareholder Agreement Checks")
     if y_col:
+        # Check for Yes (case-insensitive)
         spv_rows = filtered[filtered[y_col].astype(str).str.lower() == "yes"].copy()
+        
         if not spv_rows.empty:
             st.warning("⚠️ 'Yes' found in SPV < 100% Equity column.")
             st.info("Action: Check Shareholder Agreement.") 
+            
             if len(spv_hold_cols) >= 1:
                 def check_holdings(row):
                     issues = []
                     for col in spv_hold_cols:
                         val = clean_percent(row[col])
-                        if val > 50: issues.append(f"{col}: {val}% (> 50%)")
-                    if issues: return "🔴 " + ", ".join(issues)
+                        if val > 50: 
+                            issues.append(f"{col}: {val}% (> 50%)")
+                    
+                    if issues: 
+                        return "🔴 " + ", ".join(issues)
                     return "🟢 All <= 50%"
 
                 spv_rows["Holding Check"] = spv_rows.apply(check_holdings, axis=1)
+                
                 show_spv_cols = ["Name of REIT", "Financial Year", y_col] + spv_hold_cols + ["Holding Check"]
                 st.dataframe(spv_rows[show_spv_cols].astype(str), use_container_width=True, hide_index=True)
+                
                 if spv_rows["Holding Check"].str.contains("🔴").any():
                     st.error("Alert: Some SPV holdings exceed 50%.")
                 else:
@@ -145,6 +165,7 @@ def render():
             (filtered[r_col].astype(str).str.strip() != "") & 
             (filtered[r_col].astype(str).str.strip() != "-")
         ).any()
+        
         val_sum = filtered[r_col].apply(clean_currency).sum()
         
         if has_data and val_sum > 0:
