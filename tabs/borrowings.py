@@ -1,6 +1,8 @@
 # tabs/borrowings.py
+from wsgiref import types
 import pandas as pd
 import streamlit as st
+from tabs.fundraising import multiselect_with_select_all
 from utils.common import (
     ENT_COL, FY_COL, QTR_COL, EPS,
     DEFAULT_REIT_BORR_URL, DEFAULT_INVIT_BORR_URL,
@@ -163,15 +165,9 @@ def render():
     with st.sidebar:
         segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_borrow")
         # compute the default URL after segment is chosen
-        default_url = DEFAULT_INVIT_BORR_URL if segment == "InvIT" else DEFAULT_REIT_BORR_URL
-
-        data_url = st.text_input(
-            "Data URL",
-            value=default_url,
-            key=f"fund_url_{segment}",
-        )
-        data_url = data_url.strip()
-
+        
+        data_url = DEFAULT_INVIT_BORR_URL if segment == "InvIT" else DEFAULT_REIT_BORR_URL
+        
     if not data_url.strip():
         st.warning("Please provide a data URL."); st.stop()
 
@@ -180,14 +176,16 @@ def render():
     except Exception as e:
         st.error(f"Could not read the URL. Make sure it’s publicly accessible.\n\nDetails: {e}"); st.stop()
 
-    # Filters
-    c1, c2, c3 = st.columns(3)
-    with c1: entity = st.selectbox("Entity", sorted(df[ENT_COL].dropna().astype(str).unique()), key=f"entity_{segment}")
-    with c2: fy = st.selectbox("Financial Year", sorted(df.loc[df[ENT_COL] == entity, FY_COL].dropna().astype(str).unique()), key=f"fy_{segment}")
-    with c3:
+    with st.sidebar:
+        st.divider()
+        entity = multiselect_with_select_all(
+            "Entity", sorted(df[ENT_COL].dropna().astype(str).unique()), key=f"entity_{segment}", default_all=False,
+            help="Use “Select all” at the top to include every entity.",
+        )
+        fy = multiselect_with_select_all("Financial Year", sorted(df.loc[df[ENT_COL] == entity, FY_COL].dropna().astype(str).unique()), key=f"fy_{segment}", default_all=False)
         qtr_present = df.loc[(df[ENT_COL] == entity) & (df[FY_COL] == fy), QTR_COL].dropna().astype(str).unique().tolist()
-        qtr = st.selectbox("Quarter", _quarter_sort(qtr_present), key=f"qtr_{segment}")
-
+        qtr = multiselect_with_select_all("Quarter", _quarter_sort(qtr_present), key=f"qtr_{segment}", default_all=False)
+    
     row_df = df[(df[ENT_COL] == entity) & (df[FY_COL] == fy) & (df[QTR_COL] == qtr)]
     if row_df.empty: st.warning("No data found for the selected filters."); st.stop()
     row = row_df.iloc[0]

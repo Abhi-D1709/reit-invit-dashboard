@@ -127,16 +127,10 @@ def render():
     st.header("Fund Raising")
     _inject_page_css()
     with st.sidebar:
-        segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_fund")
-        # compute the default URL after segment is chosen
-        default_url = DEFAULT_INVIT_FUND_URL if segment == "InvIT" else DEFAULT_REIT_FUND_URL
-
-        data_url = st.text_input(
-            "Data URL",
-            value=default_url,
-            key=f"fund_url_{segment}",
-        )
-        data_url = data_url.strip()
+            segment = st.selectbox("Select Segment", ["REIT", "InvIT"], key="seg_fund")
+        
+    # Auto-select URL (hidden from UI)
+    data_url = DEFAULT_INVIT_FUND_URL if segment == "InvIT" else DEFAULT_REIT_FUND_URL
 
     if not data_url:
         st.warning("Please provide a data URL.")
@@ -157,18 +151,15 @@ def render():
     types    = sorted(df[type_col].dropna().astype(str).unique()) if type_col else []
     cats     = sorted(df[cat_col].dropna().astype(str).unique()) if cat_col else []
 
-    c1, c2, c3, c4 = st.columns([2.2, 1.2, 1.2, 1.2], gap="small")
-
-    with c1:
+    # Move filters to sidebar
+    with st.sidebar:
+        st.divider()
         ent_sel = multiselect_with_select_all(
             "Entity", entities, key="fund_ent", default_all=False,
             help="Use “Select all” at the top to include every entity.",
         )
-    with c2:
         fy_sel = multiselect_with_select_all("Financial Year", fy_vals, key="fund_fy", default_all=False)
-    with c3:
         type_sel = multiselect_with_select_all("Type of Issue", types, key="fund_type", default_all=False)
-    with c4:
         cat_sel = multiselect_with_select_all("Category", cats, key="fund_cat", default_all=False)
 
     if not any([ent_sel, fy_sel, type_sel, cat_sel]):
