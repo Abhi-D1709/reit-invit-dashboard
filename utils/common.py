@@ -43,6 +43,9 @@ VALUATION_REIT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1dujQ1XpnorGg
 # Related Party Transactions (REITs)
 RPT_REIT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1zn1XtA1DHF0VANTkowFZqenUUDSISlz1LFscT8SI-yM/edit?usp=sharing"
 
+# Investment Conditions (REITs)
+INVESTMENT_REIT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OqnSFP_PkzsoIr4BaP66-5XqdNlGVTbK9DR3thqp9JA/edit?usp=sharing"
+
 # Canonical internal names
 ENT_COL = "__Entity__"
 FY_COL  = "__FinancialYear__"
