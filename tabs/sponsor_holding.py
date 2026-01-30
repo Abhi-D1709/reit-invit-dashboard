@@ -131,15 +131,9 @@ def render():
     st.header("Sponsor Holding")
     with st.sidebar:
         seg = st.selectbox("Select Segment", ["REIT", "InvIT"], key="sp_seg")
-        # compute the default URL after segment is chosen
-        default_url = DEFAULT_INVIT_SPON_URL if seg == "InvIT" else DEFAULT_REIT_SPON_URL
-
-        data_url = st.text_input(
-            "Data URL",
-            value=default_url,
-            key=f"fund_url_{seg}",
-        )
-        data_url = data_url.strip()
+    
+    # Auto-select URL (Hidden from UI)
+    data_url = DEFAULT_INVIT_SPON_URL if seg == "InvIT" else DEFAULT_REIT_SPON_URL
 
     if not data_url.strip():
         st.warning("Please provide a data URL.")
@@ -155,14 +149,19 @@ def render():
         st.warning("Couldn’t find entity names in the sheet. Ensure a 'Name of REIT/InvIT' column is present.")
         st.stop()
 
-    ent = st.selectbox("Entity", sorted(df[ENT_COL].dropna().astype(str).unique()), key="sp_ent")
+# Filters in Sidebar
+    with st.sidebar:
+        st.divider()
+        ent = st.selectbox("Entity", sorted(df[ENT_COL].dropna().astype(str).unique()), key="sp_ent")
 
-    fy_opts = df.loc[df[ENT_COL] == ent, FY_COL].dropna().astype(str).unique().tolist()
-    if not fy_opts:
-        st.warning("No financial years found for the selected entity.")
-        st.stop()
+        fy_opts = df.loc[df[ENT_COL] == ent, FY_COL].dropna().astype(str).unique().tolist()
+        
+        # If no FYs, we can stop here or let the selectbox handle empty
+        if not fy_opts:
+            st.warning("No financial years found.")
+            st.stop()
 
-    fy = st.selectbox("Financial Year", _sort_fy(fy_opts), key="sp_fy")
+        fy = st.selectbox("Financial Year", _sort_fy(fy_opts), key="sp_fy")
 
     row_df = df[(df[ENT_COL] == ent) & (df[FY_COL] == fy)]
     if row_df.empty:
