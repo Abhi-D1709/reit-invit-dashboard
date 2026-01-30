@@ -502,9 +502,9 @@ def render() -> None:
     st.title("Governance — Committee Composition Checks")
 
     seg = st.sidebar.selectbox("Select Segment", ["REIT"], index=0)
-    _ = seg  # reserved for future InvIT support
-
-    url = st.sidebar.text_input("Data URL", value=DEFAULT_GOVERNANCE_URL)
+    
+    # Auto-select URL (Hidden)
+    url = DEFAULT_GOVERNANCE_URL
 
     comp, meetings, board, ind, notes = _load_all_sheets(url)
     if notes:
@@ -569,15 +569,15 @@ def render() -> None:
             ind_ok = True
 
     # Selections
-    entity = st.selectbox("Choose REIT", sorted(comp["Name of REIT"].unique()))
+    entity = st.sidebar.selectbox("Choose REIT", sorted(comp["Name of REIT"].unique()))
     comp_e = comp[comp["Name of REIT"] == entity]
 
     years = sorted(comp_e["Financial Year"].unique())
-    fy = st.selectbox("Financial Year", years, index=max(0, len(years) - 1))
+    fy = st.sidebar.selectbox("Financial Year", years, index=max(0, len(years) - 1))
     comp_ey = comp_e[comp_e["Financial Year"] == fy]
 
     periods = sorted(comp_ey["Period Ended"].unique())
-    period = st.selectbox("Period Ended", periods, index=0)
+    period = st.sidebar.selectbox("Period Ended", periods, index=0)
     comp_now = comp_ey[comp_ey["Period Ended"] == period]
 
     # Sheet2 subset for FY
