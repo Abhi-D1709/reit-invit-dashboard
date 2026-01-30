@@ -502,27 +502,42 @@ def render():
         st.error("VALUATION_REIT_SHEET_URL is not configured in utils/common.py")
         return
 
+    # 1. Load Data Upfront to generate Sidebar Options
+    df_raw = load_valuation_sheet(DEFAULT_VALUATION_URL)
+    df_time = load_valuation_timelines_sheet(DEFAULT_VALUATION_URL, VALUATION_TIMELINE_GID)
+    df_fund = load_fundraising_data(DEFAULT_REIT_FUND_URL)
+
+    # 2. Sidebar Filters (Shared)
+    with st.sidebar:
+        st.divider()
+        # Combine unique Entities and FYs from both sheets
+        ents_1 = set(df_raw["Name of REIT"].dropna()) if not df_raw.empty else set()
+        ents_2 = set(df_time["Name of REIT"].dropna()) if not df_time.empty else set()
+        all_ents = sorted(list(ents_1 | ents_2))
+
+        fys_1 = set(df_raw["Financial Year"].dropna()) if not df_raw.empty else set()
+        fys_2 = set(df_time["Financial Year"].dropna()) if not df_time.empty else set()
+        all_fys = sorted(list(fys_1 | fys_2))
+
+        selected_entity = st.selectbox("Entity", ["All"] + all_ents, key="val_side_ent")
+        selected_fy = st.selectbox("Financial Year", ["All"] + all_fys, key="val_side_fy")
+
     tab_registry, tab_compliance = st.tabs(["Valuer Details & Tenure", "Timelines & Compliance"])
 
     # ========================== TAB 1: Valuer Details ==========================
     with tab_registry:
-        df_raw = load_valuation_sheet(DEFAULT_VALUATION_URL)
         if df_raw.empty:
             st.warning("No valuation rows found in Sheet1.")
         else:
-            c1, c2 = st.columns([2, 1], vertical_alignment="center")
-            ent_list = sorted(df_raw["Name of REIT"].dropna().unique().tolist())
-            fy_list  = sorted(df_raw["Financial Year"].dropna().unique().tolist())
-            entity = c1.selectbox("Entity", ent_list, index=0, key="val_ent_1")
-            fy     = c2.selectbox("Financial Year", ["All"] + fy_list, index=0, key="val_fy_1")
-
             ibbi_ind, ibbi_ent = _ensure_registry(force_refresh=force_refresh)
             if force_refresh:
                 st.success(f"Registry updated! Found {len(ibbi_ind)} individuals and {len(ibbi_ent)} entities.")
 
-            q = df_raw[df_raw["Name of REIT"] == entity].copy()
-            if fy != "All":
-                q = q[q["Financial Year"] == fy]
+            q = df_raw.copy()
+            if selected_entity != "All":
+                q = q[q["Name of REIT"] == selected_entity]
+            if selected_fy != "All":
+                q = q[q["Financial Year"] == selected_fy]
 
             if q.empty:
                 st.info("No rows for the selected filters.")
@@ -548,21 +563,14 @@ def render():
 
     # ========================== TAB 2: Timelines & Compliance ==========================
     with tab_compliance:
-        df_time = load_valuation_timelines_sheet(DEFAULT_VALUATION_URL, VALUATION_TIMELINE_GID)
-        df_fund = load_fundraising_data(DEFAULT_REIT_FUND_URL)
-
         if df_time.empty:
             st.warning("Could not load Sheet2 (Timelines Data). Please check the Sheet GID.")
         else:
-            c1, c2 = st.columns([2, 1], vertical_alignment="center")
-            ent_list_t = sorted(df_time["Name of REIT"].dropna().unique().tolist())
-            fy_list_t  = sorted(df_time["Financial Year"].dropna().unique().tolist())
-            entity_t = c1.selectbox("Entity", ["All"] + ent_list_t, index=0, key="val_ent_2")
-            fy_t     = c2.selectbox("Financial Year", ["All"] + fy_list_t, index=0, key="val_fy_2")
-
             q_time = df_time.copy()
-            if entity_t != "All": q_time = q_time[q_time["Name of REIT"] == entity_t]
-            if fy_t != "All": q_time = q_time[q_time["Financial Year"] == fy_t]
+            if selected_entity != "All": 
+                q_time = q_time[q_time["Name of REIT"] == selected_entity]
+            if selected_fy != "All": 
+                q_time = q_time[q_time["Financial Year"] == selected_fy]
 
             checked_df, freq_alerts, fund_checks = check_timelines_and_completeness(q_time, df_fund)
             
@@ -589,8 +597,8 @@ def render():
             st.subheader("2. Valuation Frequency Checks")
             if not freq_alerts.empty:
                 f_alerts_show = freq_alerts.copy()
-                if entity_t != "All": f_alerts_show = f_alerts_show[f_alerts_show["Name of REIT"] == entity_t]
-                if fy_t != "All": f_alerts_show = f_alerts_show[f_alerts_show["Financial Year"] == fy_t]
+                if selected_entity != "All": f_alerts_show = f_alerts_show[f_alerts_show["Name of REIT"] == selected_entity]
+                if selected_fy != "All": f_alerts_show = f_alerts_show[f_alerts_show["Financial Year"] == selected_fy]
                 if not f_alerts_show.empty:
                     st.error(f"Found {len(f_alerts_show)} missing valuation reports.")
                     st.dataframe(f_alerts_show, use_container_width=True, hide_index=True)
@@ -606,7 +614,7 @@ def render():
             
             if not fund_checks.empty:
                 f_checks_show = fund_checks.copy()
-                if entity_t != "All": f_checks_show = f_checks_show[f_checks_show["Name of REIT"] == entity_t]
+                if selected_entity != "All": f_checks_show = f_checks_show[f_checks_show["Name of REIT"] == selected_entity]
                 
                 # Show full table of evidence
                 st.dataframe(f_checks_show, use_container_width=True, hide_index=True)
