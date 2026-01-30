@@ -386,11 +386,9 @@ def render():
 
     with st.sidebar:
         seg = st.selectbox("Select Segment", ["REIT", "InvIT"], index=0)
-        gsheet_url = st.text_input(
-            "Data URL",
-            value=DEFAULT_SHEET_URL_TRUST,
-            help=f"Trust sheet: '{TRUST_SHEET_NAME}'. SPV sheet: '{SPV_SHEET_NAME}'.",
-        )
+    
+    # Auto-set URL (Hidden)
+    gsheet_url = DEFAULT_SHEET_URL_TRUST
 
     if seg != "REIT":
         st.info("InvIT checks will be added later.")
@@ -403,7 +401,7 @@ def render():
     if df_trust_all.empty:
         return
 
-    ent = st.selectbox(
+    ent = st.sidebar.selectbox(
         "Choose REIT",
         sorted(df_trust_all["Name of REIT"].dropna().unique().tolist()),
         index=0,
@@ -417,7 +415,7 @@ def render():
         if not link.empty and isinstance(link.iloc[0], str) and link.iloc[0].strip():
             st.markdown(f"**Offer Document:** [{link.iloc[0].strip()}]({link.iloc[0].strip()})")
 
-    level = st.radio("Analysis level", ["Trust", "SPV/HoldCo"], horizontal=True, key="ndcf_level_select")
+    level = st.sidebar.radio("Analysis level", ["Trust", "SPV/HoldCo"], horizontal=True, key="ndcf_level_select")
 
     if level == "Trust":
         fy_options = sorted(
@@ -428,7 +426,7 @@ def render():
             df_spv_all.loc[df_spv_all["Name of REIT"] == ent, "Financial Year"].dropna().unique().tolist()
         )
 
-    fy = st.selectbox("Financial Year", ["— Select —"] + fy_options, index=0, key="ndcf_fy_select")
+    fy = st.sidebar.selectbox("Financial Year", ["— Select —"] + fy_options, index=0, key="ndcf_fy_select")
 
     if fy == "— Select —":
         st.info("Pick a Financial Year to show results.")
