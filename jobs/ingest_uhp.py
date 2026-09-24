@@ -21,6 +21,8 @@ Rules (same spirit as the other jobs):
     on demand). Older NSE filings often have no XBRL at all (the feed says ".../null"); they
     are kept with an empty xbrlFile, since their sponsor/public percentages still feed trends.
   * Only the latest submission per (trust, as-on date) is kept; BSE and NSE both re-file.
+  * The entities sheet is the master list: only trusts in it are kept (a delisted trust, or one
+    that surrendered its registration, is removed from the sheet and then from here).
   * BSE's archive API answers 403 to cloud hosts (GitHub Actions, Streamlit Cloud). That is
     reported as a warning, not an error, and the manifest records when BSE-only trusts were
     last refreshed. They file only ~4 times a year: run this job from a normal connection
@@ -170,25 +172,36 @@ def nse_records(index: str, start: dt.date, end: dt.date) -> list[dict]:
 
 
 # ------------------------------- BSE -----------------------------------------
-def bse_only_entities() -> tuple[list[tuple[int, str, str]], str | None]:
-    """Trusts with a BSE scrip code and no NSE symbol, from the entities sheet."""
+def load_tracked() -> tuple[set[str] | None, list[tuple[int, str, str]], str | None]:
+    """(NSE symbols in the entities sheet, BSE-only trusts, warning). The NSE set is None when
+    the sheet can't be read; nothing is then filtered out (better stale than wrongly deleted)."""
     try:
-        r = requests.get(ENTITIES_SHEET_CSV, headers={"User-Agent": UA}, timeout=30)
-        r.raise_for_status()
+        last: Exception | None = None
+        for attempt in range(4):  # Google's export endpoint times out now and then
+            try:
+                r = requests.get(ENTITIES_SHEET_CSV, headers={"User-Agent": UA}, timeout=45)
+                r.raise_for_status()
+                break
+            except requests.RequestException as e:
+                last = e
+                time.sleep(2 * (attempt + 1))
+        else:
+            raise last  # type: ignore[misc]
         df = pd.read_csv(io.StringIO(r.text), dtype=str).fillna("")
         need = {"Type of Entity", "Name of Entity", "NSE Symbol", "BSE Scrip Code"}
         if not need.issubset(df.columns):
             raise ValueError("entities sheet columns changed")
     except Exception as e:
-        return FALLBACK_BSE_ONLY, f"Entities sheet unavailable ({e}); used the built-in BSE-only list."
-    out = []
+        return None, FALLBACK_BSE_ONLY, f"Entities sheet unavailable ({e}); nothing was filtered and the built-in BSE-only list was used."
+    nse = {x.strip().upper() for x in df["NSE Symbol"] if x.strip()}
+    bse_only = []
     for _, r in df.iterrows():
-        scrip = re.sub(r"\D", "", r["BSE Scrip Code"].split(".")[0])
+        scrip = re.sub(r"[^0-9]", "", r["BSE Scrip Code"].split(".")[0])
         kind = r["Type of Entity"].strip().upper()
         if r["NSE Symbol"].strip() or not scrip or kind not in {"REIT", "INVIT"}:
             continue
-        out.append((int(scrip), r["Name of Entity"].strip(), "reits" if kind == "REIT" else "invits"))
-    return out, None
+        bse_only.append((int(scrip), r["Name of Entity"].strip(), "reits" if kind == "REIT" else "invits"))
+    return nse, bse_only, None
 
 
 def _bse_record(scrip: int, name: str, index: str, symbol: str, row: dict, xbrl_dir: Path) -> dict:
@@ -224,9 +237,13 @@ def bse_records(entities, xbrl_dir: Path, known_files: set[str], errors: list[st
         except (RuntimeError, ValueError) as e:
             (blocked if "403" in str(e) else errors).append(f"{name} ({scrip}): {e}")
             continue
+        newest: dict[str, dict] = {}  # BSE lists every re-filing; only the latest per quarter is worth downloading
         for row in rows:
-            if not row.get("XBRL_Link"):
-                continue
+            if row.get("XBRL_Link"):
+                q = str(row.get("qtr") or row.get("Quarter"))
+                if q not in newest or row["Filing_Date_Time"] >= newest[q]["Filing_Date_Time"]:
+                    newest[q] = row
+        for row in newest.values():
             parts = (row.get("navigateurl") or "").split("/")
             symbol = parts[3].upper() if len(parts) > 3 and parts[3] else f"BSE{scrip}"
             jobs.append((scrip, name, index, symbol, row))
@@ -293,20 +310,28 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
+    tracked_nse, entities, warn = load_tracked()
+    if warn:
+        warnings.append(warn)
+
     fresh: list[dict] = []
     for index in ("reits", "invits"):
         log(f"NSE {index} ...")
         try:
             recs = nse_records(index, start, end)
             log(f"  {len(recs)} feed records (variants combined, before de-duplication)")
-            fresh += download_nse_xbrl(recs, xbrl_dir, errors)
+            if tracked_nse is not None:
+                recs = [r for r in recs if r["ndsSymbol"] in tracked_nse]  # only trusts in the entities sheet
+            latest: dict[tuple[str, str], dict] = {}  # only the newest submission per (trust, as-on date) is worth downloading
+            for r in recs:
+                k = (r["ndsSymbol"], r["asOnDate"])
+                if k not in latest or r["filedAt"] >= latest[k]["filedAt"]:
+                    latest[k] = r
+            fresh += download_nse_xbrl(list(latest.values()), xbrl_dir, errors)
         except RuntimeError as e:
             errors.append(str(e))
 
     log("BSE-only trusts ...")
-    entities, warn = bse_only_entities()
-    if warn:
-        warnings.append(warn)
     blocked: list[str] = []
     bse_recs, bse_reached = bse_records(entities, xbrl_dir, set(existing["xbrlFile"]) if len(existing) else set(), errors, blocked)
     fresh += bse_recs
@@ -321,6 +346,17 @@ def main() -> int:
     merged = pd.concat([f for f in (existing, pd.DataFrame(fresh, columns=COLUMNS)) if not f.empty], ignore_index=True)
     merged["_asof"] = pd.to_datetime(merged["asOnDate"].str.title(), format="%d-%b-%Y", errors="coerce")
     merged = merged.dropna(subset=["_asof"]).sort_values("filedAt").drop_duplicates(["ndsSymbol", "asOnDate"], keep="last")
+    # drop trusts that are no longer in the entities sheet (also removes previously stored ones)
+    excluded: list[str] = []
+    excluded_rows = 0
+    if tracked_nse is not None:
+        bse_scrips = {str(e[0]) for e in entities}
+        keep = ((merged["source"] == "NSE") & merged["ndsSymbol"].isin(tracked_nse)) | ((merged["source"] == "BSE") & merged["bseScripCode"].isin(bse_scrips))
+        excluded = sorted(set(merged.loc[~keep, "ndsSymbol"]))
+        excluded_rows = int((~keep).sum())
+        merged = merged[keep]
+        if excluded:
+            log(f"  excluded (not in the entities sheet): {', '.join(excluded)}")
     # only list filings whose XBRL is on disk
     merged = merged[merged["xbrlFile"].map(lambda f: f == "" or _xbrl_path(xbrl_dir, f).exists())]
     merged = merged.sort_values(["index", "ndsSymbol", "_asof"], ascending=[True, True, False]).reset_index(drop=True)
@@ -331,10 +367,20 @@ def main() -> int:
     merged = merged.drop(columns="_asof")
     merged = merged[COLUMNS]
 
+    # remove XBRL files no filing refers to any more (excluded trusts, superseded re-filings)
+    referenced = {_xbrl_path(xbrl_dir, f).name for f in merged["xbrlFile"] if f}
+    removed = 0
+    for path in xbrl_dir.glob("*.gz"):
+        if path.name not in referenced:
+            path.unlink()
+            removed += 1
+    if removed:
+        log(f"  removed {removed} unreferenced XBRL file(s)")
+
     if not merged.empty and not (fpath.exists() and pd.read_parquet(fpath).equals(merged)):
         merged.to_parquet(fpath, index=False, compression="zstd")
-    if len(existing) and len(merged) < len(existing):
-        warnings.append(f"Stored filings fell from {len(existing)} to {len(merged)} (a superseded re-filing was replaced, or files went missing).")
+    if len(existing) and len(merged) < len(existing) - excluded_rows:
+        warnings.append(f"Stored filings fell from {len(existing)} to {len(merged)} beyond the {excluded_rows} excluded (a re-filing was replaced, or files went missing).")
 
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     prev_bse = manifest.get("uhp", {}).get("bse_last_refreshed")
@@ -347,6 +393,7 @@ def main() -> int:
         "bse_filings": int((merged["source"] == "BSE").sum()),
         "without_xbrl": int((merged["xbrlFile"] == "").sum()),
         "latest_as_on": merged["asOnDate"].map(lambda s: dt.datetime.strptime(s.title(), "%d-%b-%Y")).max().date().isoformat() if len(merged) else None,
+        "excluded_symbols": excluded,
         "warnings": warnings,
         "errors": errors,
     }
