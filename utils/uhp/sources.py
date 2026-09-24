@@ -37,6 +37,11 @@ def fetch_xbrl(url_or_name: str) -> str:
     return load_uhp_xbrl((url_or_name or "").rstrip("/").split("/")[-1])
 
 
+def data_version() -> str:
+    """Changes whenever the published filings change; used as part of cache keys."""
+    return load_manifest().get("uhp", {}).get("generated_at", "")
+
+
 def data_status() -> str:
     meta = load_manifest().get("uhp")
     if not meta:

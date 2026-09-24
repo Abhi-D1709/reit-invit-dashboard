@@ -25,10 +25,26 @@ def _parse_date(d: str):
         return None
 
 
+MASTER_SCHEMA = 2  # bump when the shape of the filings table changes (see get_master_df)
+
+
+def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Tolerate a filings table built by an older version of the code (e.g. a stale cache entry
+    after a deploy): older tables have no `xbrlFile` column, only the full `xbrlFilePath` URL."""
+    if not df.empty and "xbrlFile" not in df.columns:
+        paths = df["xbrlFilePath"].fillna("").astype(str) if "xbrlFilePath" in df.columns else pd.Series("", index=df.index)
+        df = df.assign(xbrlFile=paths.map(lambda p: p.rstrip("/").split("/")[-1] if p and not p.lower().endswith("/null") else ""))
+    return df
+
+
+# Streamlit keys this cache on THIS function's source and its arguments, not on the code of the
+# functions it calls. After a deploy that only changed fetch_master, the previous version's cached
+# result (a different table shape) kept being served to the new page code, which then crashed.
+# So the key includes the data version (changes with every data refresh) and MASTER_SCHEMA.
 @st.cache_data(ttl=3600)
-def get_master_df(index: str) -> tuple[pd.DataFrame, list[str]]:
+def get_master_df(index: str, data_version: str = "", schema: int = MASTER_SCHEMA) -> tuple[pd.DataFrame, list[str]]:
     records, problems = filing_source.fetch_master(index)
-    df = pd.DataFrame(records)
+    df = _ensure_schema(pd.DataFrame(records))
     if df.empty:
         return df, problems
     df["asOnDateParsed"] = df["asOnDate"].apply(_parse_date)
@@ -395,7 +411,8 @@ def render():
         index = "invits" if index_label == "InvITs" else "reits"
 
         try:
-            master_df, problems = get_master_df(index)
+            master_df, problems = get_master_df(index, filing_source.data_version(), MASTER_SCHEMA)
+            master_df = _ensure_schema(master_df)
         except filing_source.DataUnavailable as e:
             st.error(f"Filings are not available yet: {e}")
             st.stop()
