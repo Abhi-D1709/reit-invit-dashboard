@@ -142,7 +142,7 @@
   ]
  },
  "errors": [],
- "generated_at": "2026-09-24T06:27:36Z",
+ "generated_at": "2026-09-24T09:06:08Z",
  "history_start": "2017-01-01",
  "ibbi": {
   "entities": 140,
@@ -575,9 +575,15 @@
  "uhp": {
   "bse_filings": 72,
   "entities": 33,
-  "errors": [],
+  "errors": [
+   "BSE archive for Energy Infrastructure Trust (542543): BSE https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=542543: 403 Client Error: Forbidden for url: https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=542543",
+   "BSE archive for Altius Telecom Infrastructure Trust (543225): BSE https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=543225: 403 Client Error: Forbidden for url: https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=543225",
+   "BSE archive for Digital Fibre Infrastructure Trust (543859): BSE https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=543859: 403 Client Error: Forbidden for url: https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=543859",
+   "BSE archive for Maple Infrastructure Trust (543925): BSE https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=543925: 403 Client Error: Forbidden for url: https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=543925",
+   "BSE archive for Intelligent Supply Chain Infrastructure Trust (544005): BSE https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=544005: 403 Client Error: Forbidden for url: https://api.bseindia.com/BseIndiaAPI/api/unitholdingarchive/w?scripcode=544005"
+  ],
   "filings": 477,
-  "generated_at": "2026-09-24T09:01:27Z",
+  "generated_at": "2026-09-24T09:07:29Z",
   "latest_as_on": "2026-08-25",
   "nse_filings": 405,
   "warnings": [],
