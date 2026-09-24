@@ -574,16 +574,14 @@
  },
  "uhp": {
   "bse_filings": 72,
-  "bse_last_refreshed": null,
+  "bse_last_refreshed": "2026-09-24T09:12:34Z",
   "entities": 33,
   "errors": [],
   "filings": 477,
-  "generated_at": "2026-09-24T09:11:37Z",
+  "generated_at": "2026-09-24T09:12:34Z",
   "latest_as_on": "2026-08-25",
   "nse_filings": 405,
-  "warnings": [
-   "BSE blocked the archive request for 5 of 5 BSE-only trust(s) (HTTP 403, usual for cloud hosts); their filings were not refreshed. Run `python -m jobs.ingest_uhp` from a normal connection to refresh them."
-  ],
+  "warnings": [],
   "without_xbrl": 45
  },
  "warnings": [
