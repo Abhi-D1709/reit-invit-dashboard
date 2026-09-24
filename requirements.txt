@@ -10,3 +10,4 @@ supabase>=2.4,<3
 python-dateutil
 openpyxl
 XlsxWriter>=3.2
+pyarrow>=15

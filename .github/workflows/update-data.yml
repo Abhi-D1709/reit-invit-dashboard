@@ -1,0 +1,66 @@
+# Daily refresh of machine-generated data (trading now; more datasets later).
+# Writes only to the `data` branch, so the app is never redeployed by a data update.
+name: Update market data
+
+on:
+  schedule:
+    - cron: "30 15 * * 1-6"   # 21:00 IST Mon-Sat (Saturday: occasional special sessions)
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Rebuild all history from scratch (slow)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code (main)
+        uses: actions/checkout@v4
+
+      - name: Checkout data branch into ./data
+        uses: actions/checkout@v4
+        with:
+          ref: data
+          path: data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: jobs/requirements.txt
+
+      - run: pip install -r jobs/requirements.txt
+
+      - name: Ingest trading data
+        id: ingest
+        continue-on-error: true   # still publish whatever succeeded; errors are recorded in manifest.json
+        run: python -m jobs.ingest_trades ${{ inputs.full && '--full' || '' }}
+
+      - name: Commit data
+        working-directory: data
+        run: |
+          git config user.name "data-bot"
+          git config user.email "data-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "data: $(date -u +%F)"
+            git push origin HEAD:data
+          fi
+
+      - name: Fail the run if ingest reported errors
+        if: steps.ingest.outcome == 'failure'
+        run: |
+          echo "Ingest finished with errors; see data/manifest.json."
+          exit 1
