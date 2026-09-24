@@ -102,6 +102,13 @@ def _to_date(v) -> pd.Timestamp:
         return pd.NaT
 
 
+def _tri(passed: pd.Series, unknown: pd.Series) -> pd.Series:
+    """Nullable boolean: True/False where the inputs exist, <NA> ("insufficient data") where they
+    don't. A comparison against a missing value is False in plain pandas, which reported missing
+    data as a failed check."""
+    return passed.astype("boolean").mask(unknown)
+
+
 def _status(v: Optional[bool]) -> str:
     if pd.isna(v):
         return "—"
@@ -300,12 +307,13 @@ def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
 
     out = df.copy()
     out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
-    out["Meets 90% Rule"] = out["Payout Ratio %"] >= 90.0
+    out["Meets 90% Rule"] = _tri(out["Payout Ratio %"] >= 90.0, out["Payout Ratio %"].isna())
 
-    out["CF Sum"] = out[cfo].fillna(0) + out[cfi].fillna(0) + out[cff].fillna(0) + out[pat].fillna(0)
+    # all four figures are needed; a missing one used to count as 0 and gave a made-up total
+    out["CF Sum"] = out[[cfo, cfi, cff, pat]].sum(axis=1, min_count=4)
     out["Gap vs Computed"] = out["CF Sum"] - out[comp]
     out["Gap % of Computed"] = np.where(out[comp] != 0, (out["Gap vs Computed"] / out[comp]) * 100.0, np.nan).round(2)
-    out["Within 10% Gap"] = out["Gap % of Computed"].abs() <= 10.0
+    out["Within 10% Gap"] = _tri(out["Gap % of Computed"].abs() <= 10.0, out["Gap % of Computed"].isna())
     return out
 
 
@@ -327,8 +335,12 @@ def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
     t = df.copy()
     t["Days Decl→Record"] = (t["Record Date"] - t["Declaration Date"]).dt.days
     t["Days Record→Distr"] = (t["Distribution Date"] - t["Record Date"]).dt.days
-    t["Record ≤ 2 days"] = (t["Days Decl→Record"] >= 0) & (t["Days Decl→Record"] <= 2)
-    t["Distribution ≤ 5 days"] = (t["Days Record→Distr"] >= 0) & (t["Days Record→Distr"] <= 5)
+    t["Record ≤ 2 days"] = _tri(
+        (t["Days Decl→Record"] >= 0) & (t["Days Decl→Record"] <= 2), t["Days Decl→Record"].isna()
+    )
+    t["Distribution ≤ 5 days"] = _tri(
+        (t["Days Record→Distr"] >= 0) & (t["Days Record→Distr"] <= 5), t["Days Record→Distr"].isna()
+    )
     return t[
         [
             "Financial Year",
@@ -360,23 +372,22 @@ def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
 
     out = df.copy()
     out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
-    out["Meets 90% Rule (SPV)"] = out["Payout Ratio %"] >= 90.0
+    out["Meets 90% Rule (SPV)"] = _tri(out["Payout Ratio %"] >= 90.0, out["Payout Ratio %"].isna())
 
-    out["SPV+HoldCo CF Sum"] = (
-        out[spv_cfo].fillna(0)
-        + out[spv_cfi].fillna(0)
-        + out[spv_cff].fillna(0)
-        + out[spv_pat].fillna(0)
-        + out[hco_cfo].fillna(0)
-        + out[hco_cfi].fillna(0)
-        + out[hco_cff].fillna(0)
-        + out[hco_pat].fillna(0)
-    )
+    # The SPV's four figures are always needed. The HoldCo's four are needed only when there is a
+    # HoldCo ("Leave Blank if N/A"); without one they contribute nothing.
+    holdco_name = out["Name of Holdco (Leave Blank if N/A)"].astype(str).str.strip().str.lower()
+    has_holdco = ~holdco_name.isin(["", "nan", "-", "na", "n/a", "none", "nil"])
+    spv_sum = out[[spv_cfo, spv_cfi, spv_cff, spv_pat]].sum(axis=1, min_count=4)
+    hco_sum = out[[hco_cfo, hco_cfi, hco_cff, hco_pat]].sum(axis=1, min_count=4).where(has_holdco, 0.0)
+    out["SPV+HoldCo CF Sum"] = spv_sum + hco_sum
     out["Gap vs Computed (SPV)"] = out["SPV+HoldCo CF Sum"] - out[comp]
     out["Gap % of Computed (SPV)"] = np.where(
         out[comp] != 0, (out["Gap vs Computed (SPV)"] / out[comp]) * 100.0, np.nan
     ).round(2)
-    out["Within Computed Bound (SPV)"] = np.where(out[comp] > 0, out["Gap vs Computed (SPV)"].abs() < out[comp], np.nan)
+    out["Within Computed Bound (SPV)"] = _tri(
+        out["Gap vs Computed (SPV)"].abs() < out[comp], out["Gap vs Computed (SPV)"].isna() | ~(out[comp] > 0)
+    )
     return out
 
 
@@ -448,6 +459,13 @@ def render():
         c1.metric("TRUST: periods meeting 90% payout", f"{good_payout}/{total}")
         c2.metric("TRUST: periods within 10% gap", f"{good_gap}/{total}")
         c3.metric("TRUST: rows analysed", f"{total}")
+        n_unknown_payout = int(q["Meets 90% Rule"].isna().sum())
+        n_unknown_gap = int(q["Within 10% Gap"].isna().sum())
+        if n_unknown_payout or n_unknown_gap:
+            st.caption(
+                f"Insufficient data (shown as —): {n_unknown_payout} period(s) for the payout check and "
+                f"{n_unknown_gap} for the cash-flow gap check. They are not counted as passes or failures."
+            )
 
         st.subheader("Trust Check 1 — 90% payout of Computed NDCF (period-wise)")
         disp1 = q[
@@ -462,7 +480,7 @@ def render():
         ].copy()
         disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(_status)
         st.dataframe(disp1, use_container_width=True, hide_index=True)
-        if (~q["Meets 90% Rule"].astype("boolean").fillna(False)).any():
+        if (~q["Meets 90% Rule"].astype("boolean").fillna(True)).any():
             st.error(
                 "TRUST: One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF)."
             )
@@ -485,7 +503,7 @@ def render():
         ].copy()
         disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(_status)
         st.dataframe(disp2, use_container_width=True, hide_index=True)
-        if (~q["Within 10% Gap"].astype("boolean").fillna(False)).any():
+        if (~q["Within 10% Gap"].astype("boolean").fillna(True)).any():
             st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
         # -------- Split timeline checks into two separate tables ----------
@@ -539,7 +557,7 @@ def render():
         ].copy()
         disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(_status)
         st.dataframe(disp_s1, use_container_width=True, hide_index=True)
-        if (~q["Meets 90% Rule (SPV)"].astype("boolean").fillna(False)).any():
+        if (~q["Meets 90% Rule (SPV)"].astype("boolean").fillna(True)).any():
             st.error("SPV: One or more SPV periods do **not** meet the 90% payout requirement.")
 
         st.subheader("SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed NDCF| < Computed NDCF")
@@ -558,7 +576,7 @@ def render():
         ].copy()
         disp_s2["Within Computed Bound (SPV)"] = disp_s2["Within Computed Bound (SPV)"].map(_status)
         st.dataframe(disp_s2, use_container_width=True, hide_index=True)
-        if (~q["Within Computed Bound (SPV)"].astype("boolean").fillna(False)).any():
+        if (~q["Within Computed Bound (SPV)"].astype("boolean").fillna(True)).any():
             st.error("SPV: One or more SPV periods have |Gap| ≥ Computed NDCF.")
 
 

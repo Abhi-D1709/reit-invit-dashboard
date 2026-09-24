@@ -12,45 +12,20 @@ import streamlit as st
 # ------------------------------------------------------------
 # Config & helpers from your common utilities
 # ------------------------------------------------------------
-try:
-    from utils.common import (
-        VALUATION_REIT_SHEET_URL,
-        DEFAULT_REIT_FUND_URL,
-        DEFAULT_INVIT_FUND_URL,
-        ENT_COL, 
-        inject_global_css,
-        load_table_url,
-        _standardize_selector_columns,
-        _find_col
-    )
-    DEFAULT_VALUATION_URL = VALUATION_REIT_SHEET_URL.strip()
-    # Sheet2 GID inferred from your screenshot/url logic
-    VALUATION_TIMELINE_GID = "122761239" 
-except Exception:
-    DEFAULT_VALUATION_URL = ""
-    DEFAULT_REIT_FUND_URL = ""
-    DEFAULT_INVIT_FUND_URL = ""
-    ENT_COL = "Entity"
-    VALUATION_TIMELINE_GID = "0"
+from utils.common import (
+    VALUATION_REIT_SHEET_URL,
+    DEFAULT_REIT_FUND_URL,
+    DEFAULT_INVIT_FUND_URL,
+    ENT_COL,
+    inject_global_css,
+    load_table_url,
+    _standardize_selector_columns,
+    _find_col,
+)
 
-    def inject_global_css() -> None: pass
-
-    def _gsheet_csv_from_share(url: str, gid: Optional[int] = None) -> str:
-        if not url: return url
-        m = re.match(r"(https://docs\.google\.com/spreadsheets/d/[^/]+)", url.strip())
-        if not m: return url
-        base = m.group(1)
-        return f"{base}/export?format=csv" if gid is None else f"{base}/export?format=csv&gid={gid}"
-
-    def load_table_url(url: str, sheet: Optional[str] = None, gid: Optional[int] = None) -> pd.DataFrame:
-        csv_url = _gsheet_csv_from_share(url, gid=gid)
-        try:
-            return pd.read_csv(csv_url)
-        except Exception:
-            return pd.DataFrame()
-            
-    def _standardize_selector_columns(df): return df
-    def _find_col(cols, aliases=None, must_tokens=None, exclude_tokens=None): return cols[0] if cols else None
+DEFAULT_VALUATION_URL = VALUATION_REIT_SHEET_URL.strip()
+# gid of the "timelines" tab (Sheet2) in the valuation workbook
+VALUATION_TIMELINE_GID = "122761239"
 
 
 # ------------------------------------------------------------
@@ -168,7 +143,10 @@ def evaluate_rows(df: pd.DataFrame, ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFra
     out["Tenure End"] = out.apply(lambda r: r["Resignation Date"] if pd.notna(r["Resignation Date"]) else r["FY End"], axis=1)
     out["Tenure (days)"] = out.apply(lambda r: _tenure_days(r["Appointment Date"], r["Tenure End"]), axis=1)
     out["Tenure (years)"] = out["Tenure (days)"].map(lambda d: round(d / 365.25, 2) if pd.notna(d) else None)
-    out["Tenure ≤ 4 years"] = out["Tenure (days)"].map(lambda d: bool(d is not None and d <= 4 * 365.25))
+    # <NA> when the tenure can't be worked out (missing appointment date or unreadable FY): "insufficient data",
+    # not a failure. It used to be False, which reported "> 4 years" for every row with a missing date.
+    days = pd.to_numeric(out["Tenure (days)"], errors="coerce")
+    out["Tenure ≤ 4 years"] = (days <= 4 * 365.25).astype("boolean").mask(days.isna())
 
     index = _registry_index(ibbi_ind, ibbi_ent)
     matches = [
@@ -177,7 +155,9 @@ def evaluate_rows(df: pd.DataFrame, ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFra
     ]
     out["IBBI Registered?"] = pd.array([m[0] for m in matches], dtype="boolean")  # <NA> = registry unavailable
     out["Matched Type"] = [m[1] for m in matches]
-    out["Tenure Status"] = out["Tenure ≤ 4 years"].map(lambda ok: "✅ OK" if ok else "❌ > 4 years")
+    out["Tenure Status"] = out["Tenure ≤ 4 years"].map(
+        lambda ok: "⚪ Insufficient data" if pd.isna(ok) else ("✅ OK" if ok else "❌ > 4 years")
+    )
 
     def ibbi_status(m):
         if m[0] is None:

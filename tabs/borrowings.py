@@ -1,12 +1,13 @@
 # tabs/borrowings.py
+import numpy as np
 import pandas as pd
 import streamlit as st
 from utils.common import (
     ENT_COL, FY_COL, QTR_COL, EPS,
     DEFAULT_REIT_BORR_URL, DEFAULT_INVIT_BORR_URL,
-    _to_date, _to_pct, _is_taken, _is_yes, _is_aaa,
+    _to_date, _is_taken, _is_yes, _is_aaa,
     _find_col, _num_series, _standardize_selector_columns, _quarter_sort,
-    _url, load_table_url
+    _url, load_table_url, resolve_percent_units
 )
 
 # --- Constants for Business Logic ---
@@ -25,18 +26,25 @@ def _process_borrowings_df(df: pd.DataFrame) -> pd.DataFrame:
     cash_col   = _find_col(cols, aliases=["Cash and Cash Equivalents","C. Cash and Cash Equivalents"], must_tokens=["cash","equivalent"])
     assets_col = _find_col(cols, aliases=["Value of REIT Assets","D. Value of REIT Assets","Value of InvIT Assets"], must_tokens=["value","asset"])
 
-    A = _num_series(df, borrow_col, 0.0)
-    B = _num_series(df, defer_col, 0.0)
-    C = _num_series(df, cash_col, 0.0)
-    D = _num_series(df, assets_col, pd.NA).replace(0, pd.NA)
+    # NBR computed from the components needs Borrowings, Cash and Assets; a blank Deferred Payments
+    # means "none". A missing column or cell used to be read as 0, which gave a wrong ratio.
+    A = _num_series(df, borrow_col)
+    B = _num_series(df, defer_col).fillna(0.0)
+    C = _num_series(df, cash_col)
+    D = _num_series(df, assets_col).where(lambda s: s != 0)  # zero assets = unknown
+    computed = (A + B - C) / D
 
     nbr_col = _find_col(cols, aliases=["Net Borrowings Ratio (NBR)"], must_tokens=["borrow","ratio","nbr"])
     if nbr_col:
-        df["NBR_ratio"] = df[nbr_col].apply(_to_pct)
-
-    if "NBR_ratio" not in df.columns or df["NBR_ratio"].isna().any():
-        computed = (A.add(B, fill_value=0).sub(C, fill_value=0)) / D
-        df["NBR_ratio"] = df.get("NBR_ratio", computed).fillna(computed)
+        # The sheet mixes "26.09%", 26.09 and 0.2609, even within one column and per entity, so the
+        # unit is decided per cell with the computed ratio as a check (see resolve_percent_units).
+        sheet_nbr, how = resolve_percent_units(df[nbr_col], reference=computed, groups=df[ENT_COL])
+        df["NBR_ratio"] = sheet_nbr.fillna(computed)
+        df["NBR_how"] = how.where(sheet_nbr.notna(), np.where(computed.notna(), "computed from the components", ""))
+    else:
+        df["NBR_ratio"] = computed
+        df["NBR_how"] = np.where(computed.notna(), "computed from the components", "")
+    df["NBR_computed"] = computed
 
     for col in ["Date of Publishing Credit Rating CRA1", "Date of Publishing Credit Rating CRA2", "Date of meeting for Unitholder Approval", "Date Of intimation to Trustee"]:
         if col in df.columns:
@@ -194,6 +202,13 @@ def render():
         nbr_display = "-" if pd.isna(nbr) else f"{float(nbr)*100:.2f}%"
         st.markdown(f'<div class="kpi">📊 <b>Net Borrowings Ratio</b><br><span class="kpi-value">{nbr_display}</span></div>', unsafe_allow_html=True)
         if isinstance(nbr, (int, float)) and not pd.isna(nbr): st.progress(min(max(float(nbr), 0.0), 1.0))
+        how = str(row.get("NBR_how") or "")
+        if how.startswith(("closest", "same entity", "assumed")):
+            st.caption(f"The NBR in the sheet has no % sign; its unit was inferred ({how}).")
+        computed = row.get("NBR_computed")
+        if (isinstance(nbr, (int, float)) and not pd.isna(nbr) and isinstance(computed, (int, float))
+                and not pd.isna(computed) and how != "computed from the components" and abs(nbr - computed) > 0.02):
+            st.caption(f"Note: the NBR in the sheet ({nbr*100:.2f}%) differs from the NBR computed from its own components ({computed*100:.2f}%).")
     with colB:
         _render_card_breakup(row, df.attrs.get("__matched_cols__", {}))
 

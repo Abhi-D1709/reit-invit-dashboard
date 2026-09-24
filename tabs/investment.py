@@ -4,8 +4,28 @@ import streamlit as st
 import re
 from utils.common import (
     INVESTMENT_REIT_SHEET_URL,
-    inject_global_css
+    inject_global_css,
+    parse_number,
+    resolve_percent_units,
+    _MISSING_TEXT,
 )
+
+NO_DATA = "⚪ N/A — insufficient data"
+
+
+def asset_ratio_status(completed: float, total: float) -> str:
+    """Status text for "investment in completed assets >= 80% of total REIT assets".
+
+    A missing figure (blank, "-", "NA") is missing, not zero: reading it as 0 turned every row
+    without a value into "Alert: < 80%". The 81-85% band is kept as configured on this page."""
+    if pd.isna(completed) or pd.isna(total) or total == 0:
+        return NO_DATA
+    ratio = (completed / total) * 100
+    if 81 <= ratio <= 85:
+        return f"🔴 {ratio:.2f}% (Alert: In 81-85% Bracket)"
+    if ratio >= 80:
+        return f"🟢 {ratio:.2f}% (No alert)"
+    return f"🔴 {ratio:.2f}% (Alert: < 80%)"
 
 @st.cache_data(ttl=600, show_spinner="Loading Investment Data...")
 def load_investment_data():
@@ -18,26 +38,6 @@ def load_investment_data():
     except Exception as e:
         st.error(f"Failed to load Investment Data: {e}")
         return pd.DataFrame()
-
-def clean_currency(x):
-    if pd.isna(x): return 0.0
-    s = str(x).strip()
-    if s in {"", "-", "NA", "N/A"}: return 0.0
-    s = s.replace(",", "")
-    try:
-        return float(s)
-    except:
-        return 0.0
-
-def clean_percent(x):
-    if pd.isna(x): return 0.0
-    s = str(x).strip().replace("%", "")
-    if s in {"", "-", "NA", "N/A"}: return 0.0
-    s = s.replace(",", "")
-    try:
-        return float(s)
-    except:
-        return 0.0
 
 def render():
     st.header("Investment Conditions")
@@ -86,36 +86,22 @@ def render():
     st.caption("Rules: Target ≥ 80% (Green). **Exception:** Red Alert if ratio is between 81% and 85%.")
     
     if c_col and u_col:
-        def check_80_rule(row):
-            val_c = clean_currency(row[c_col])
-            val_u = clean_currency(row[u_col])
-            
-            if val_u == 0: return "N/A"
-            
-            ratio = (val_c / val_u) * 100
-            
-            # Logic: Red alert if in 81-85% bracket
-            if 81 <= ratio <= 85:
-                return f"🔴 {ratio:.2f}% (Alert: In 81-85% Bracket)"
-            
-            # Logic: Green (No alert) if valid (>= 80% and NOT in 81-85%)
-            if ratio >= 80:
-                return f"🟢 {ratio:.2f}% (No alert)"
-            
-            # Logic: Red alert if < 80%
-            return f"🔴 {ratio:.2f}% (Alert: < 80%)"
-
-        filtered["Asset Ratio Check"] = filtered.apply(check_80_rule, axis=1)
+        filtered["Asset Ratio Check"] = [
+            asset_ratio_status(parse_number(r[c_col]), parse_number(r[u_col])) for _, r in filtered.iterrows()
+        ]
         cols_1 = ["Name of REIT", "Financial Year", c_col, u_col, "Asset Ratio Check"]
         
         st.dataframe(filtered[cols_1].astype(str), use_container_width=True, hide_index=True)
         
         # Check if any row triggered the specific 81-85% warning
+        no_data = filtered["Asset Ratio Check"] == NO_DATA
         if filtered["Asset Ratio Check"].str.contains("81-85% Bracket").any():
             st.error("Alert: Some investments fall within the 81-85% warning bracket.")
         elif filtered["Asset Ratio Check"].str.contains("🔴").any():
             st.error("Alert: Investment ratio below 80%.")
-        else:
+        if no_data.any():
+            st.info(f"{int(no_data.sum())} row(s) have no completed-assets or total-assets figure, so the ratio could not be checked.")
+        elif not filtered["Asset Ratio Check"].str.contains("🔴").any():
             st.success("Asset Investment Ratios are compliant (≥ 80% and outside warning bracket).")
     else:
         st.warning("Could not identify Columns C or U.")
@@ -133,25 +119,28 @@ def render():
             st.info("Action: Check Shareholder Agreement.") 
             
             if len(spv_hold_cols) >= 1:
+                # percent points per column (the sheet may hold "60%", 60 or 0.6); blank stays blank
+                points = {col: resolve_percent_units(spv_rows[col])[0] * 100 for col in spv_hold_cols}
+
                 def check_holdings(row):
-                    issues = []
-                    for col in spv_hold_cols:
-                        val = clean_percent(row[col])
-                        if val > 50: 
-                            issues.append(f"{col}: {val}% (> 50%)")
-                    
-                    if issues: 
+                    known = {col: points[col].loc[row.name] for col in spv_hold_cols if not pd.isna(points[col].loc[row.name])}
+                    if not known:
+                        return "⚪ No holding figures provided"
+                    issues = [f"{col}: {val:g}% (> 50%)" for col, val in known.items() if val > 50]
+                    if issues:
                         return "🔴 " + ", ".join(issues)
                     return "🟢 All <= 50%"
 
                 spv_rows["Holding Check"] = spv_rows.apply(check_holdings, axis=1)
-                
+
                 show_spv_cols = ["Name of REIT", "Financial Year", y_col] + spv_hold_cols + ["Holding Check"]
                 st.dataframe(spv_rows[show_spv_cols].astype(str), use_container_width=True, hide_index=True)
-                
+
                 if spv_rows["Holding Check"].str.contains("🔴").any():
                     st.error("Alert: Some SPV holdings exceed 50%.")
-                else:
+                if spv_rows["Holding Check"].str.contains("⚪").any():
+                    st.info("Some rows give no SPV holding figures, so they could not be checked.")
+                elif not spv_rows["Holding Check"].str.contains("🔴").any():
                     st.success("All SPV holdings are ≤ 50%.")
             else:
                 st.warning("Could not find SPV Holding columns.")
@@ -165,17 +154,17 @@ def render():
     # 4. Mutual Funds
     st.subheader("3. Mutual Funds Credit Risk")
     if r_col:
-        has_data = (
-            filtered[r_col].notna() & 
-            (filtered[r_col].astype(str).str.strip() != "") & 
-            (filtered[r_col].astype(str).str.strip() != "-")
-        ).any()
-        
-        val_sum = filtered[r_col].apply(clean_currency).sum()
-        
-        if has_data and val_sum > 0:
+        values = filtered[r_col].map(parse_number)
+        # something is written in the cell (not blank / "-" / "NA") ...
+        written = filtered[r_col].map(lambda x: not (pd.isna(x) or str(x).strip().lower() in _MISSING_TEXT))
+        # ... but it isn't a readable number: still counts as "found", it must not pass as "no investment"
+        unreadable = written & values.isna()
+
+        if (values > 0).any() or unreadable.any():
             st.dataframe(filtered[["Name of REIT", "Financial Year", r_col]].astype(str), use_container_width=True, hide_index=True)
             st.warning("⚠️ Alert: Mutual Fund investments found. Check the credit risk value and class of mutual funds.")
+            if unreadable.any():
+                st.caption(f"{int(unreadable.sum())} value(s) could not be read as a number; please check them in the sheet.")
         else:
             st.success("No Mutual Fund investments found.")
     else:

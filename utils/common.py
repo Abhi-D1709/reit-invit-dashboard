@@ -100,29 +100,106 @@ def _to_date(val):
     dt = pd.to_datetime(str(val), errors="coerce", dayfirst=True)
     return dt.date().isoformat() if not pd.isna(dt) else str(val)
 
-def _to_pct(val):
-    if val is None or (isinstance(val, str) and val.strip() == "") or pd.isna(val):
-        return None
-    if isinstance(val, str) and val.strip().endswith("%"):
-        try:
-            return float(val.strip().replace("%", "")) / 100.0
-        except Exception:
-            return None
-    try:
-        v = float(val)
-        return v / 100.0 if v > 1 else v
-    except Exception:
-        return None
+# Placeholders people type instead of leaving a cell empty. All of them mean "no value", never zero.
+_MISSING_TEXT = {
+    "", "-", "--", "\u2014", "\u2013", "na", "n/a", "n.a.", "n.a", "nil", "none", "null", "nan",
+    "not applicable", "not available", "#n/a", "#div/0!", "#value!", "#ref!", "#name?",
+}
 
-def _to_num(val):
-    if val is None or (isinstance(val, str) and val.strip() in {"", "-", "—"}):
+
+def parse_number(val) -> float:
+    """Number from a sheet cell; NaN when the cell is blank, a placeholder ("-", "NA", "#DIV/0!")
+    or cannot be read. Never returns 0 for "no value": a missing figure must stay missing so
+    checks can say "insufficient data" instead of passing or failing on an invented zero.
+
+    Handles thousands separators (also Indian 3,16,124), currency marks, (1,200) as -1200 and a
+    unicode minus. A trailing % is ignored (the number is returned as written); use
+    resolve_percent_units for percentages, where the unit matters.
+    """
+    if val is None or isinstance(val, bool):
         return np.nan
+    if isinstance(val, (int, float, np.integer, np.floating)):
+        return float(val) if math.isfinite(float(val)) else np.nan
+    text = str(val).replace("\u00a0", " ").strip()
+    if text.lower() in _MISSING_TEXT:
+        return np.nan
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1]
+    text = text.replace("\u2212", "-")
+    for junk in (",", "\u20b9", "$", " ", "%"):
+        text = text.replace(junk, "")
+    for prefix in ("rs.", "rs", "inr"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
     try:
-        if isinstance(val, (int, float)) and not isinstance(val, bool):
-            return float(val)
-        return float(str(val).replace(",", "").strip())
-    except Exception:
+        number = float(text)
+    except ValueError:
         return np.nan
+    if not math.isfinite(number):
+        return np.nan
+    return -abs(number) if negative else number
+
+
+_to_num = parse_number  # historical name
+
+
+def resolve_percent_units(raw: pd.Series, reference: pd.Series | None = None, groups: pd.Series | None = None):
+    """Turn a column of percentages typed in mixed conventions into fractions (0.25 = 25%).
+
+    People type the same ratio as "26%", "26.09" (percent points) or "0.2609" (fraction), and a
+    single column can mix them, even per entity. Guessing per cell is wrong (0.85 can be 85% or
+    0.85%), so each cell is decided by the best evidence available, in this order:
+
+      1. it has a % sign                          -> percent points
+      2. |value| > 1.5                             -> percent points (a fraction that large is implausible)
+      3. `reference` (the same ratio computed from other columns) is known
+                                                   -> whichever reading lands closer to it
+      4. the same group (entity) has other rows that are clearly percent points
+                                                   -> percent points
+      5. otherwise                                 -> fraction
+
+    Returns (fractions, how): `how` says which rule decided each cell ("" when blank).
+    """
+    cells = raw.astype("object")
+    has_sign = cells.map(lambda v: isinstance(v, str) and v.strip().endswith("%"))
+    number = cells.map(parse_number)
+    fractions = pd.Series(np.nan, index=cells.index, dtype="float64")
+    how = pd.Series("", index=cells.index, dtype="object")
+
+    fractions[has_sign] = number[has_sign] / 100.0
+    how[has_sign] = "with % sign"
+
+    bare = ~has_sign & number.notna()
+    big = bare & (number.abs() > 1.5)
+    fractions[big] = number[big] / 100.0
+    how[big] = "percent points (value above 1.5)"
+
+    open_ = bare & ~big
+    if reference is not None and open_.any():
+        ref = pd.to_numeric(reference, errors="coerce")
+        usable = open_ & ref.notna()
+        as_points = (number / 100.0 - ref).abs()
+        as_fraction = (number - ref).abs()
+        points = usable & (as_points < as_fraction)
+        fractions[points] = number[points] / 100.0
+        how[points] = "closest to the value computed from the components"
+        fraction = usable & ~points
+        fractions[fraction] = number[fraction]
+        how[fraction] = "closest to the value computed from the components"
+        open_ = open_ & ~usable
+
+    if groups is not None and open_.any():
+        points_groups = set(groups[big].dropna())
+        points = open_ & groups.isin(points_groups)
+        fractions[points] = number[points] / 100.0
+        how[points] = "same entity's other rows are percent points"
+        open_ = open_ & ~points
+
+    fractions[open_] = number[open_]
+    how[open_] = "assumed a fraction (value between -1.5 and 1.5)"
+    return fractions, how
+
 
 def _is_taken(value):
     if value is None or (isinstance(value, float) and math.isnan(value)) or pd.isna(value):
@@ -152,8 +229,10 @@ def _find_col(columns, aliases=None, must_tokens=None, exclude_tokens=None):
     for c, n in norm_map.items():
         if n in norm_aliases:
             return c
+    if not must_tokens:
+        return None  # no alias matched and no tokens to search by: report "not found", never guess a column
     for c, n in norm_map.items():
-        if all(t in n for t in must_tokens or []) and not any(x in n for x in exclude_tokens or []):
+        if all(t in n for t in must_tokens) and not any(x in n for x in exclude_tokens):
             return c
     return None
 
@@ -183,7 +262,7 @@ def _share_to_csv_url(url: str) -> str:
 
 def _num_series(df: pd.DataFrame, colname: str, fill=np.nan) -> pd.Series:
     if colname and colname in df.columns:
-        return pd.to_numeric(df[colname].map(_to_num), errors="coerce")
+        return pd.to_numeric(df[colname].map(parse_number), errors="coerce")
     return pd.Series([fill] * len(df), index=df.index, dtype="float64")
 
 def _standardize_selector_columns(df: pd.DataFrame) -> pd.DataFrame:

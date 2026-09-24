@@ -7,23 +7,27 @@ from utils.common import (
     ENT_COL, FY_COL, QTR_COL,
     inject_global_css,
     load_table_url,
+    parse_number,
     _standardize_selector_columns
 )
 
-def clean_currency(x):
-    """
-    Helper to convert string currency (e.g., '3,16,124' or '25.325') to float.
-    Returns 0.0 if conversion fails.
-    """
-    if pd.isna(x): return 0.0
-    s = str(x).strip()
-    if s in {"", "-", "NA", "N/A"}: return 0.0
-    # Remove commas
-    s = s.replace(",", "")
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
+ACQUISITION_LIMIT = 1.10  # transaction value must be <= 110% of the average of the two valuations
+
+
+def acquisition_status(txn: float, valuation_1: float, valuation_2: float, limit: float = ACQUISITION_LIMIT) -> str:
+    """"Pass", "Fail" or "Insufficient data" for: value of transaction <= 110% of the average
+    of the two valuations. A missing figure (blank, "-", "NA") is missing, not zero: reading it as
+    0 made the limit 0 and reported "Fail" for every transaction without valuations."""
+    if pd.isna(txn) or pd.isna(valuation_1) or pd.isna(valuation_2):
+        return "Insufficient data"
+    return "Pass" if txn <= (valuation_1 + valuation_2) / 2 * limit else "Fail"
+
+
+def rpt_total(amounts: pd.Series):
+    """(sum of the readable amounts or None if none is readable, number of blank/unreadable cells)."""
+    values = amounts.map(parse_number)
+    missing = int(values.isna().sum())
+    return (None if missing == len(values) else float(values.sum(skipna=True))), missing
 
 @st.cache_data(ttl=600, show_spinner="Loading Related Party Data...")
 def load_rpt_data():
@@ -181,8 +185,8 @@ def render():
         else:
             rpt_col = "Amount of Transaction"
             if rpt_col in df3_filtered.columns:
-                total_rpt_value = df3_filtered[rpt_col].apply(clean_currency).sum()
-                
+                total_rpt_value, n_unreadable = rpt_total(df3_filtered[rpt_col])
+
                 mask_borr = (
                     (borrowings_df[ENT_COL] == selected_entity) & 
                     (borrowings_df[FY_COL].astype(str) == str(selected_fy)) &
@@ -192,17 +196,23 @@ def render():
                 assets_row = borrowings_df[mask_borr]
                 
                 if not assets_row.empty:
-                    asset_val_raw = assets_row.iloc[0]["Value of REIT Assets"]
-                    asset_val = clean_currency(asset_val_raw)
-                    
-                    if asset_val > 0:
+                    asset_val = parse_number(assets_row.iloc[0].get("Value of REIT Assets"))
+
+                    if pd.isna(asset_val) or asset_val <= 0:
+                        st.warning(f"Value of REIT Assets is missing or zero for {selected_entity} in FY {selected_fy}.")
+                    elif total_rpt_value is None:
+                        st.warning("No readable transaction amounts for this selection, so RPT intensity cannot be computed.")
+                    else:
                         percentage = (total_rpt_value / asset_val) * 100
                         c1, c2, c3 = st.columns(3)
                         c1.metric("Total RPT Value", f"{total_rpt_value:,.2f}")
                         c2.metric("REIT Assets (Mar)", f"{asset_val:,.2f}")
                         c3.metric("RPT Intensity", f"{percentage:.2f}%")
-                    else:
-                        st.warning(f"Value of REIT Assets is 0 for {selected_entity} in FY {selected_fy}.")
+                        if n_unreadable:
+                            st.caption(
+                                f"{n_unreadable} of {len(df3_filtered)} transaction amount(s) were blank or unreadable and are "
+                                "not included, so the intensity may be understated."
+                            )
                 else:
                     st.warning(f"Could not find Asset Value for {selected_entity} (FY {selected_fy}, Quarter 'Mar') in Borrowings data.")
             else:
@@ -264,24 +274,22 @@ def render():
         col_v2  = "Valuation 2 (INR Crores)"
         
         if all(c in df5_filtered.columns for c in [col_txn, col_v1, col_v2]):
-            def check_valuation(row):
-                txn_val = clean_currency(row[col_txn])
-                v1_val  = clean_currency(row[col_v1])
-                v2_val  = clean_currency(row[col_v2])
-                avg_val = (v1_val + v2_val) / 2
-                limit = avg_val * 1.10
-                if txn_val <= limit:
-                    return "Pass"
-                else:
-                    return "Fail"
-
             if not df5_filtered.empty:
-                df5_filtered["Check Status"] = df5_filtered.apply(check_valuation, axis=1)
+                df5_filtered["Check Status"] = [
+                    acquisition_status(parse_number(r[col_txn]), parse_number(r[col_v1]), parse_number(r[col_v2]))
+                    for _, r in df5_filtered.iterrows()
+                ]
                 st.dataframe(df5_filtered, use_container_width=True, hide_index=True)
                 failures = df5_filtered[df5_filtered["Check Status"] == "Fail"]
+                insufficient = df5_filtered[df5_filtered["Check Status"] == "Insufficient data"]
                 if not failures.empty:
                     st.error(f"Alert: {len(failures)} transaction(s) exceed the 110% valuation limit.")
-                else:
+                if not insufficient.empty:
+                    st.info(
+                        f"{len(insufficient)} transaction(s) have no value or fewer than two valuations, so the 110% check "
+                        "could not be done for them (shown as 'Insufficient data')."
+                    )
+                if failures.empty and insufficient.empty:
                     st.success("All transactions are within the 110% valuation limit.")
             else:
                 st.info(f"No acquisition transactions found in {selected_fy} for {selected_entity}.")

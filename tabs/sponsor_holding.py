@@ -13,8 +13,9 @@ from utils.common import (
 
 # ---------- helpers ----------
 
-def _fy_end_date(fy: str) -> date:
-    """'2019-20' -> 2020-03-31, '2024-25' -> 2025-03-31, '2020' -> 2020-03-31 (best-effort)."""
+def _fy_end_date(fy: str):
+    """'2019-20' -> 2020-03-31, '2024-25' -> 2025-03-31, '2020' -> 2020-03-31.
+    None when the text isn't a financial year (it used to return today's date, silently changing the answer)."""
     if not isinstance(fy, str):
         fy = str(fy or "")
     fy = fy.strip()
@@ -26,7 +27,7 @@ def _fy_end_date(fy: str) -> date:
             end_year = int(fy)
         return date(end_year, 3, 31)
     except Exception:
-        return date.today()
+        return None
 
 def _years_between(d1: date, d2: date) -> float:
     return abs((d2 - d1).days) / 365.25
@@ -51,9 +52,10 @@ def _load_sponsor_df(url: str) -> pd.DataFrame:
                     "Total Outstanding Units of the Trust at the end of FY",
                 ])
 
-    df["__sponsor_units__"]       = _num_series(df, spon_col, 0.0)
-    df["__sponsor_group_units__"] = _num_series(df, group_col, 0.0)
-    df["__total_units__"]         = _num_series(df, total_col, math.nan)
+    # A missing column or blank cell is "no data", not 0 (0 units would trigger a false "< 15%" alert).
+    df["__sponsor_units__"]       = _num_series(df, spon_col)
+    df["__sponsor_group_units__"] = _num_series(df, group_col)
+    df["__total_units__"]         = _num_series(df, total_col)
 
     if list_col:
         df["Listing Date (display)"] = df[list_col].apply(_to_date)
@@ -63,7 +65,8 @@ def _load_sponsor_df(url: str) -> pd.DataFrame:
         df["__listing_dt__"] = pd.NaT
 
     tot  = df["__total_units__"].replace({0.0: math.nan})
-    hold = df["__sponsor_units__"].add(df["__sponsor_group_units__"], fill_value=0.0)
+    # sponsor units are required; a blank sponsor-group cell means "no sponsor group"
+    hold = df["__sponsor_units__"] + df["__sponsor_group_units__"].fillna(0.0)
 
     df["Sponsor+Group %"] = hold.divide(tot).astype(float)
     df["Public %"]        = (1.0 - df["Sponsor+Group %"]).astype(float)
@@ -77,7 +80,7 @@ def _load_sponsor_df(url: str) -> pd.DataFrame:
     return df
 
 def _sort_fy(values):
-    return sorted(values, key=lambda fy: _fy_end_date(str(fy)))
+    return sorted(values, key=lambda fy: _fy_end_date(str(fy)) or date.max)
 
 def _stacked_meter_html(s_pct: float, p_pct: float) -> str:
     """
@@ -196,19 +199,27 @@ def render():
     list_dt_display = row.get("Listing Date (display)", "-")
     fy_end = _fy_end_date(fy)
 
-    within_3yrs = False
-    if isinstance(list_dt, date):
-        within_3yrs = (_years_between(list_dt, fy_end) < 3.0)
+    if fy_end is None:
+        st.warning(f"The financial year '{fy}' could not be read, so the minimum-holding rule cannot be applied.")
+        return
+    if not isinstance(list_dt, date):
+        st.warning("The listing date is missing, so it is not known which minimum-holding rule applies. Not checked.")
+        return
+    within_3yrs = _years_between(list_dt, fy_end) < 3.0
 
     # Rule 1: first 3 years — Sponsor+Group ≥ 15%
     if within_3yrs:
-        if not math.isnan(s_pct) and (s_pct + EPS) < 0.15:
+        if math.isnan(s_pct):
+            st.info("Insufficient data: sponsor units or total units are missing, so the Sponsor+Group requirement (≥ 15%) was not checked.")
+        elif (s_pct + EPS) < 0.15:
             st.error(f"ALERT: Within first 3 years of listing — Sponsor+Group holding is {s_pct*100:.2f}% (< 15%).")
         else:
             st.success("Within first 3 years of listing — Sponsor+Group requirement (≥ 15%) satisfied.")
     # Rule 2: after 3 years — Public ≥ 25%
     else:
-        if not math.isnan(p_pct) and (p_pct + EPS) < 0.25:
+        if math.isnan(p_pct):
+            st.info("Insufficient data: sponsor units or total units are missing, so the minimum public unitholding (≥ 25%) was not checked.")
+        elif (p_pct + EPS) < 0.25:
             st.error(f"ALERT: After 3 years — Public holding is {p_pct*100:.2f}% (< 25%).")
         else:
             st.success("After 3 years — minimum public unitholding (≥ 25%) satisfied.")
