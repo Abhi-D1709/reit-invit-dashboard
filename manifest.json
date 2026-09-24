@@ -572,6 +572,17 @@
   ],
   "rows": 29442
  },
+ "uhp": {
+  "bse_filings": 72,
+  "entities": 33,
+  "errors": [],
+  "filings": 477,
+  "generated_at": "2026-09-24T09:01:27Z",
+  "latest_as_on": "2026-08-25",
+  "nse_filings": 405,
+  "warnings": [],
+  "without_xbrl": 45
+ },
  "warnings": [
   "NSE OSEINTRUST/IV: no rows at all (unlisted, no trades, or series changed)",
   "NSE ROADSTAR/IV: no rows at all (unlisted, no trades, or series changed)",
