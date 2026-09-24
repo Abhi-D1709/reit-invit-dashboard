@@ -74,3 +74,20 @@ def load_trades(keys: Iterable[str], start: dt.date, end: dt.date) -> pd.DataFra
     df = pd.concat(parts, ignore_index=True)
     df = df[(df["date"] >= start) & (df["date"] <= end)]
     return df.sort_values(["key", "date"]).reset_index(drop=True)
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _load_ibbi_table(name: str, generated_at: str) -> pd.DataFrame:
+    # generated_at is part of the cache key: a new scrape invalidates the cached copy
+    return pd.read_parquet(io.BytesIO(_read_bytes(f"ibbi/{name}.parquet")))
+
+
+def load_ibbi() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """IBBI register of registered valuers: (individuals, entities, meta).
+    Columns: reg_no, name, rvo, asset_class, status ("Registered" or the cancellation note),
+    cancelled_on; individuals also registration_date, entities also constitution."""
+    meta = load_manifest().get("ibbi")
+    if not meta:
+        raise DataUnavailable("The IBBI registry has not been published to the data branch yet.")
+    key = meta["generated_at"]
+    return _load_ibbi_table("individuals", key), _load_ibbi_table("entities", key), meta

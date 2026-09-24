@@ -1,0 +1,63 @@
+# Weekly refresh of the IBBI register of registered valuers.
+# Writes only to the `data` branch. Shares a concurrency group with update-data so the two
+# never push to the data branch at the same time.
+name: Update IBBI registry
+
+on:
+  schedule:
+    - cron: "30 3 * * 1"   # Mondays 09:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code (main)
+        uses: actions/checkout@v4
+
+      - name: Checkout data branch into ./data
+        uses: actions/checkout@v4
+        with:
+          ref: data
+          path: data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: jobs/requirements.txt
+
+      - run: pip install -r jobs/requirements.txt
+
+      - name: Scrape IBBI registry
+        id: ingest
+        continue-on-error: true   # errors are recorded in manifest.json and fail the run at the end
+        run: python -m jobs.ingest_ibbi
+
+      - name: Commit data
+        working-directory: data
+        run: |
+          git config user.name "data-bot"
+          git config user.email "data-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "data: ibbi $(date -u +%F)"
+            git pull --rebase origin data
+            git push origin HEAD:data
+          fi
+
+      - name: Fail the run if the scrape reported errors
+        if: steps.ingest.outcome == 'failure'
+        run: |
+          echo "IBBI scrape finished with errors; see data/manifest.json."
+          exit 1
