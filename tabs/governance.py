@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from utils import status
+from utils.status import Status  # noqa: F401
 from utils import rules as thresholds  # every threshold lives in utils/rules.py (aliased: `rules` is a local name below)
 
 # --------------------------------------------------------------------
@@ -251,7 +253,7 @@ def evaluate_rmc(df: pd.DataFrame) -> pd.DataFrame:
 
 def _to_table(rows: List[tuple]) -> pd.DataFrame:
     return pd.DataFrame(
-        {"Check": [r[0] for r in rows], "Result": ["🟢" if r[1] else "🔴" for r in rows], "Detail": [r[2] for r in rows]}
+        {"Check": [r[0] for r in rows], "Result": [status.PASS_TAG if r[1] else status.FAIL_TAG for r in rows], "Detail": [r[2] for r in rows]}
     )
 
 
@@ -284,7 +286,7 @@ def evaluate_meetings_for_committee(
 
     if m.empty:
         summary_rows = [
-            {"Rule": "Meetings in FY", "Expected": rules["min_meetings"], "Observed/Status": "0 (🔴)"},
+            {"Rule": "Meetings in FY", "Expected": rules["min_meetings"], "Observed/Status": f"0 ({status.FAIL_TAG})"},
             {"Rule": "Quorum per meeting", "Expected": quorum_needed if quorum_needed is not None else "n/a", "Observed/Status": "—"},
             {"Rule": "Min independent directors per meeting", "Expected": rules.get("min_indep_present", "—"), "Observed/Status": "—"},
         ]
@@ -326,9 +328,9 @@ def evaluate_meetings_for_committee(
                 "Members Present": present if present is not None else "—",
                 "Independent Present": indep_present if indep_present is not None else "—",
                 "Quorum Needed": q_needed,
-                "Quorum OK": "🟢" if q_ok else "🔴",
+                "Quorum OK": status.PASS_TAG if q_ok else status.FAIL_TAG,
                 "Independents Needed": id_needed if id_needed is not None else "—",
-                "IDs OK": "🟢" if id_ok else "🔴",
+                "IDs OK": status.PASS_TAG if id_ok else status.FAIL_TAG,
             }
         )
         all_meets_ok = all_meets_ok and q_ok and id_ok
@@ -337,16 +339,16 @@ def evaluate_meetings_for_committee(
 
     summary_rows = [
         {"Rule": "Meetings in FY", "Expected": thresholds.GOVERNANCE_MEETING_RULES[committee]["min_meetings"],
-         "Observed/Status": f"{meet_cnt} ({'🟢' if freq_ok else '🔴'})"},
+         "Observed/Status": f"{meet_cnt} ({status.PASS_TAG if freq_ok else status.FAIL_TAG})"},
         {"Rule": "Quorum per meeting", "Expected": quorum_needed if quorum_needed is not None else "n/a",
-         "Observed/Status": "OK" if per_table["Quorum OK"].eq("🟢").all() else "🔴 Some meetings fail quorum"},
+         "Observed/Status": "OK" if per_table["Quorum OK"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings fail quorum")},
         {"Rule": "Min independent directors per meeting", "Expected": thresholds.GOVERNANCE_MEETING_RULES[committee].get("min_indep_present", "—"),
-         "Observed/Status": "OK" if per_table["IDs OK"].eq("🟢").all() else "🔴 Some meetings lack IDs"},
+         "Observed/Status": "OK" if per_table["IDs OK"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings lack IDs")},
     ]
     if gap_days_rule is not None:
         gap_text = (f"Worst gap: {worst_gap} (OK≤{gap_days_rule})" if worst_gap is not None else "—")
         summary_rows.append({"Rule": "Max gap between meetings (days)", "Expected": gap_days_rule,
-                             "Observed/Status": ("🟢 " + gap_text) if gap_ok else ("🔴 " + gap_text)})
+                             "Observed/Status": status.tag(status.Status.PASS if gap_ok else status.Status.FAIL, gap_text)})
 
     all_ok = freq_ok and all_meets_ok if gap_days_rule is None else (freq_ok and gap_ok and all_meets_ok)
     return pd.DataFrame(summary_rows), per_table, all_ok
@@ -371,7 +373,7 @@ def evaluate_board_meetings(comp_e_fy: pd.DataFrame, board_fy: pd.DataFrame) -> 
     if board_fy.empty:
         summary = pd.DataFrame(
             [
-                {"Rule": "Board meetings in FY", "Expected": thresholds.BOARD_MIN_MEETINGS, "Observed/Status": "0 (🔴)"},
+                {"Rule": "Board meetings in FY", "Expected": thresholds.BOARD_MIN_MEETINGS, "Observed/Status": f"0 ({status.FAIL_TAG})"},
                 {"Rule": "Quorum per meeting", "Expected": f"max({thresholds.BOARD_QUORUM_MIN}, ceil(BoardSize/3))", "Observed/Status": "—"},
                 {"Rule": "Independent Director present (each mtg)", "Expected": f"≥ {thresholds.BOARD_MIN_INDEPENDENT_PRESENT}", "Observed/Status": "—"},
                 {"Rule": "Max gap between meetings (days)", "Expected": thresholds.BOARD_MAX_GAP_DAYS, "Observed/Status": "—"},
@@ -414,8 +416,8 @@ def evaluate_board_meetings(comp_e_fy: pd.DataFrame, board_fy: pd.DataFrame) -> 
                 "Directors Present": present if present is not None else "—",
                 "Independent Present": indep_present if indep_present is not None else "—",
                 "Quorum Needed": quorum_needed if quorum_needed is not None else f"n/a ({prov})",
-                "Quorum OK": "🟢" if q_ok else "🔴",
-                "≥1 ID Present": "🟢" if id_ok else "🔴",
+                "Quorum OK": status.PASS_TAG if q_ok else status.FAIL_TAG,
+                "≥1 ID Present": status.PASS_TAG if id_ok else status.FAIL_TAG,
             }
         )
         all_meets_ok = all_meets_ok and q_ok and id_ok
@@ -425,19 +427,19 @@ def evaluate_board_meetings(comp_e_fy: pd.DataFrame, board_fy: pd.DataFrame) -> 
     gap_text = (f"Worst gap: {worst_gap} (OK≤{thresholds.BOARD_MAX_GAP_DAYS})" if worst_gap is not None else "—")
     summary = pd.DataFrame(
         [
-            {"Rule": "Board meetings in FY", "Expected": thresholds.BOARD_MIN_MEETINGS, "Observed/Status": f"{meet_cnt} ({'🟢' if freq_ok else '🔴'})"},
+            {"Rule": "Board meetings in FY", "Expected": thresholds.BOARD_MIN_MEETINGS, "Observed/Status": f"{meet_cnt} ({status.PASS_TAG if freq_ok else status.FAIL_TAG})"},
             {
                 "Rule": "Quorum per meeting",
                 "Expected": f"max({thresholds.BOARD_QUORUM_MIN}, ceil(BoardSize/3)) [{prov}]",
-                "Observed/Status": "OK" if per_table["Quorum OK"].eq("🟢").all() else "🔴 Some meetings fail quorum",
+                "Observed/Status": "OK" if per_table["Quorum OK"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings fail quorum"),
             },
             {
                 "Rule": "Independent Director present (each mtg)",
                 "Expected": f"≥ {thresholds.BOARD_MIN_INDEPENDENT_PRESENT}",
-                "Observed/Status": "OK" if per_table["≥1 ID Present"].eq("🟢").all() else "🔴 Some meetings lack IDs",
+                "Observed/Status": "OK" if per_table["≥1 ID Present"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings lack IDs"),
             },
             {"Rule": "Max gap between meetings (days)", "Expected": thresholds.BOARD_MAX_GAP_DAYS,
-             "Observed/Status": ("🟢 " + gap_text) if gap_ok else ("🔴 " + gap_text)},
+             "Observed/Status": status.tag(status.Status.PASS if gap_ok else status.Status.FAIL, gap_text)},
         ]
     )
     all_ok = freq_ok and gap_ok and all_meets_ok
@@ -453,7 +455,7 @@ def evaluate_independent_directors_meeting_sheet4(ind_fy: pd.DataFrame) -> Tuple
     Rule: at least 1 meeting in the FY.
     """
     if ind_fy.empty:
-        return pd.DataFrame([{"Rule": "Independent Directors’ meeting in FY", "Expected": thresholds.INDEPENDENT_DIRECTORS_MIN_MEETINGS, "Observed/Status": "0 (🔴)"}]), pd.DataFrame(), False
+        return pd.DataFrame([{"Rule": "Independent Directors’ meeting in FY", "Expected": thresholds.INDEPENDENT_DIRECTORS_MIN_MEETINGS, "Observed/Status": f"0 ({status.FAIL_TAG})"}]), pd.DataFrame(), False
 
     df = ind_fy.copy()
     if "Date of Meeting of Independent Directors" not in df.columns:
@@ -484,7 +486,7 @@ def evaluate_independent_directors_meeting_sheet4(ind_fy: pd.DataFrame) -> Tuple
     summary = pd.DataFrame([{
         "Rule": "Independent Directors’ meeting in FY",
         "Expected": thresholds.INDEPENDENT_DIRECTORS_MIN_MEETINGS,
-        "Observed/Status": f"{count} ({'🟢' if ok else '🔴'})"
+        "Observed/Status": f"{count} ({status.PASS_TAG if ok else status.FAIL_TAG})"
     }])
     return summary, per_table, ok
 
@@ -610,7 +612,7 @@ def render() -> None:
         summary, per_meeting, ok = evaluate_meetings_for_committee(comp_now, meetings_fy, title)
         st.table(summary)
         if not per_meeting.empty:
-            st.dataframe(per_meeting, use_container_width=True)
+            st.dataframe(per_meeting, width="stretch")
         if ok:
             st.success("All meeting rules satisfied for the FY (given the selected period's committee size).")
         else:
@@ -624,7 +626,7 @@ def render() -> None:
         summary_b, per_b, ok_b = evaluate_board_meetings(comp_ey, board_fy)
         st.table(summary_b)
         if not per_b.empty:
-            st.dataframe(per_b, use_container_width=True)
+            st.dataframe(per_b, width="stretch")
         if ok_b:
             st.success("All Board meeting rules satisfied for the FY.")
         else:
@@ -638,7 +640,7 @@ def render() -> None:
         id_summary, id_per, id_ok = evaluate_independent_directors_meeting_sheet4(ind_fy)
         st.table(id_summary)
         if not id_per.empty:
-            st.dataframe(id_per, use_container_width=True)
+            st.dataframe(id_per, width="stretch")
         if id_ok:
             st.success("Independent Directors met at least once in the FY.")
         else:

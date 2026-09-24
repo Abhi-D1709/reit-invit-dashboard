@@ -9,10 +9,10 @@ import streamlit as st
 from utils import rules
 
 STATUS_ICON = {
-    rules.VERIFIED: "✅ verified",
-    rules.PARTIAL: "🟡 partly verified",
-    rules.HOUSE_RULE: "🔷 house rule",
-    rules.UNVERIFIED: "⚪ not verified",
+    rules.VERIFIED: "✔ verified",
+    rules.PARTIAL: "◐ partly verified",
+    rules.HOUSE_RULE: "◆ house rule",
+    rules.UNVERIFIED: "? not verified",
 }
 
 

@@ -51,14 +51,14 @@ class TestRegistry:
 # ------------------------------------------------ the pages follow the config at runtime
 class TestPagesFollowTheConfig:
     def test_investment_minimum(self, monkeypatch):
-        assert investment.asset_ratio_status(75.0, 100.0).startswith("🔴")
+        assert investment.asset_ratio_status(75.0, 100.0).startswith("✖")
         monkeypatch.setattr(rules, "INVEST_COMPLETED_MIN_PCT", 70.0)
-        assert investment.asset_ratio_status(75.0, 100.0).startswith("🟢")
+        assert investment.asset_ratio_status(75.0, 100.0).startswith("✔")
 
     def test_investment_alert_band_and_its_label(self, monkeypatch):
         monkeypatch.setattr(rules, "INVEST_ALERT_BAND", (70.0, 72.0))
         out = investment.asset_ratio_status(71.0, 100.0)
-        assert out.startswith("🔴") and "70-72% Bracket" in out
+        assert out.startswith("✖") and "70-72% Bracket" in out
         assert "Bracket" not in investment.asset_ratio_status(83.0, 100.0)  # the old band no longer applies
 
     def test_related_party_limit(self, monkeypatch):
@@ -104,11 +104,11 @@ class TestPagesFollowTheConfig:
         two = self._two_directors()
         base = fn(two)
         row = base[base["Check"].str.startswith("Min ")].iloc[0]
-        assert row["Check"] == "Min 3 directors" and row["Result"] == "🔴"
+        assert row["Check"] == "Min 3 directors" and row["Result"] == "✖ Fail"
         monkeypatch.setattr(rules, "COMMITTEE_MIN_DIRECTORS", 2)
         changed = fn(two)
         row = changed[changed["Check"].str.startswith("Min ")].iloc[0]
-        assert row["Check"] == "Min 2 directors" and row["Result"] == "🟢"
+        assert row["Check"] == "Min 2 directors" and row["Result"] == "✔ Pass"
 
     @pytest.mark.parametrize("evaluate", ["evaluate_audit", "evaluate_nrc"])
     def test_governance_independent_share(self, monkeypatch, evaluate):
@@ -116,11 +116,11 @@ class TestPagesFollowTheConfig:
         two = self._two_directors()  # 1 of 2 directors is independent
         base = fn(two)
         share = base[base["Check"].str.contains("independent")].iloc[0]
-        assert share["Check"] == "≥ 2/3 independent" and share["Result"] == "🔴"
+        assert share["Check"] == "≥ 2/3 independent" and share["Result"] == "✖ Fail"
         monkeypatch.setattr(rules, "COMMITTEE_INDEPENDENT_SHARE", (1, 2))
         changed = fn(two)
         share = changed[changed["Check"].str.contains("independent")].iloc[0]
-        assert share["Check"] == "≥ 1/2 independent" and share["Result"] == "🟢"
+        assert share["Check"] == "≥ 1/2 independent" and share["Result"] == "✔ Pass"
 
     @pytest.mark.parametrize("evaluate", ["evaluate_src", "evaluate_rmc"])
     def test_governance_minimum_independent(self, monkeypatch, evaluate):
@@ -128,11 +128,11 @@ class TestPagesFollowTheConfig:
         two = self._two_directors()  # exactly 1 independent
         base = fn(two)
         row = base[base["Check"].str.contains("independent")].iloc[0]
-        assert row["Check"] == "≥ 1 independent" and row["Result"] == "🟢"
+        assert row["Check"] == "≥ 1 independent" and row["Result"] == "✔ Pass"
         monkeypatch.setattr(rules, "COMMITTEE_MIN_INDEPENDENT", 2)
         changed = fn(two)
         row = changed[changed["Check"].str.contains("independent")].iloc[0]
-        assert row["Check"] == "≥ 2 independent" and row["Result"] == "🔴"
+        assert row["Check"] == "≥ 2 independent" and row["Result"] == "✖ Fail"
 
 
 # ------------------------------------- Reg. 18(16)(c): distribution within 15 days of declaration

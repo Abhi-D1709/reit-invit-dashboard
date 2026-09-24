@@ -1,0 +1,16 @@
+# Theme for the dashboard. Streamlit follows the visitor's system light/dark setting and picks
+# the matching palette below. Keep text/background pairs at WCAG AA contrast (4.5:1) or better.
+
+[theme.light]
+primaryColor = "#0F3D68"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F1F5F9"
+textColor = "#1A2433"
+linkColor = "#0B5CAD"
+
+[theme.dark]
+primaryColor = "#7FB2E5"
+backgroundColor = "#0E1621"
+secondaryBackgroundColor = "#172230"
+textColor = "#E6EDF5"
+linkColor = "#8FC1F0"

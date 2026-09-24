@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from utils import rules  # every threshold lives in utils/rules.py
+from utils import rules, theme  # every threshold lives in utils/rules.py
 
 from utils.uhp import ownership_reports, peer_benchmark, reports, sebi_format
 from utils.uhp import sources as filing_source
@@ -66,17 +66,10 @@ def style_table_i(df: pd.DataFrame):
     for c in pct_cols:
         display_df[c] = df[c].map(lambda v: "" if pd.isna(v) else f"{v:,.2f}%")
 
+    styles = theme.table_row_styles()
+
     def row_style(row):
-        kind = df.loc[row.name, "_kind"]
-        if kind == "grand_total":
-            return ["background-color: #0F3D68; color: white; font-weight: 600"] * len(row)
-        if kind == "total":
-            return ["background-color: #D3E3EE; font-weight: 600"] * len(row)
-        if kind == "subtotal":
-            return ["background-color: #EAF0F5; font-weight: 600"] * len(row)
-        if kind == "header":
-            return ["font-weight: 700; color: #0F3D68"] * len(row)
-        return [""] * len(row)
+        return [styles.get(df.loc[row.name, "_kind"], "")] * len(row)
 
     return display_df.style.apply(row_style, axis=1)
 
@@ -88,7 +81,7 @@ def render_donut(sponsor_pct: float, public_pct: float) -> go.Figure:
                 labels=["Sponsor & Sponsor Group", "Public"],
                 values=[sponsor_pct, public_pct],
                 hole=0.6,
-                marker=dict(colors=["#0F3D68", "#B08D3E"]),
+                marker=dict(colors=[theme.accent(), theme.secondary()]),
                 textfont=dict(family=CHART_FONT, size=13),
             )
         ]
@@ -97,7 +90,7 @@ def render_donut(sponsor_pct: float, public_pct: float) -> go.Figure:
         margin=dict(t=10, b=10, l=10, r=10),
         height=300,
         legend=dict(orientation="h", yanchor="bottom", y=-0.2, font=dict(family=CHART_FONT)),
-        font=dict(family=CHART_FONT, color="#1A2433"),
+        font=dict(family=CHART_FONT, color=theme.text_color()),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
@@ -111,7 +104,7 @@ def render_category_bar(breakdown_df: pd.DataFrame) -> go.Figure:
             x=df["% of Total Units"],
             y=df["Category"],
             orientation="h",
-            marker=dict(color="#0F3D68"),
+            marker=dict(color=theme.accent()),
             text=df["% of Total Units"].map(lambda v: f"{v:.2f}%"),
             textposition="outside",
             textfont=dict(family=CHART_FONT),
@@ -122,10 +115,10 @@ def render_category_bar(breakdown_df: pd.DataFrame) -> go.Figure:
         height=max(300, 30 * len(df)),
         xaxis_title="% of total outstanding units",
         yaxis_title=None,
-        font=dict(family=CHART_FONT, color="#1A2433"),
+        font=dict(family=CHART_FONT, color=theme.text_color()),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="#EAF0F5"),
+        xaxis=dict(gridcolor=theme.grid_color()),
     )
     return fig
 
@@ -137,7 +130,7 @@ def render_domestic_foreign_bar(df: pd.DataFrame) -> go.Figure:
             name="Domestic",
             x=df["Segment"],
             y=df["Domestic %"],
-            marker_color="#0F3D68",
+            marker_color=theme.accent(),
             text=df["Domestic %"].map(lambda v: f"{v:.2f}%"),
             textposition="inside",
         )
@@ -147,7 +140,7 @@ def render_domestic_foreign_bar(df: pd.DataFrame) -> go.Figure:
             name="Foreign",
             x=df["Segment"],
             y=df["Foreign %"],
-            marker_color="#B08D3E",
+            marker_color=theme.secondary(),
             text=df["Foreign %"].map(lambda v: f"{v:.2f}%"),
             textposition="inside",
         )
@@ -169,10 +162,10 @@ def render_domestic_foreign_bar(df: pd.DataFrame) -> go.Figure:
         height=380,
         yaxis_title="% of segment's total units",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(family=CHART_FONT)),
-        font=dict(family=CHART_FONT, color="#1A2433"),
+        font=dict(family=CHART_FONT, color=theme.text_color()),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        yaxis=dict(gridcolor="#EAF0F5"),
+        yaxis=dict(gridcolor=theme.grid_color()),
     )
     return fig
 
@@ -186,7 +179,7 @@ def render_trend(entity_df: pd.DataFrame, threshold: float | None = None) -> go.
             y=df["sponsorGroupPer"],
             mode="lines+markers",
             name="Sponsor & Sponsor Group %",
-            line=dict(color="#0F3D68", width=2.5),
+            line=dict(color=theme.accent(), width=2.5),
         )
     )
     fig.add_trace(
@@ -195,7 +188,7 @@ def render_trend(entity_df: pd.DataFrame, threshold: float | None = None) -> go.
             y=df["publicHoldingPer"],
             mode="lines+markers",
             name="Public Holding %",
-            line=dict(color="#B08D3E", width=2.5),
+            line=dict(color=theme.secondary(), width=2.5),
         )
     )
     if threshold is not None:
@@ -207,13 +200,13 @@ def render_trend(entity_df: pd.DataFrame, threshold: float | None = None) -> go.
                     y=breach["publicHoldingPer"],
                     mode="markers",
                     name="Below threshold",
-                    marker=dict(color="#A23B3B", size=11, symbol="x"),
+                    marker=dict(color=theme.danger(), size=11, symbol="x"),
                 )
             )
         fig.add_hline(
             y=threshold,
             line_dash="dot",
-            line_color="#A23B3B",
+            line_color=theme.danger(),
             annotation_text=f"Threshold: {threshold:.0f}%",
             annotation_position="top left",
         )
@@ -222,18 +215,18 @@ def render_trend(entity_df: pd.DataFrame, threshold: float | None = None) -> go.
         height=380,
         yaxis_title="% of total outstanding units",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(family=CHART_FONT)),
-        font=dict(family=CHART_FONT, color="#1A2433"),
+        font=dict(family=CHART_FONT, color=theme.text_color()),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="#EAF0F5"),
-        yaxis=dict(gridcolor="#EAF0F5"),
+        xaxis=dict(gridcolor=theme.grid_color()),
+        yaxis=dict(gridcolor=theme.grid_color()),
     )
     return fig
 
 
 def render_peer_bar(df: pd.DataFrame, threshold: float) -> go.Figure:
     df = df.sort_values("publicHoldingPer")
-    colors = ["#A23B3B" if v < threshold else "#0F3D68" for v in df["publicHoldingPer"]]
+    colors = [theme.danger() if v < threshold else theme.accent() for v in df["publicHoldingPer"]]
     fig = go.Figure(
         go.Bar(
             x=df["publicHoldingPer"],
@@ -248,7 +241,7 @@ def render_peer_bar(df: pd.DataFrame, threshold: float) -> go.Figure:
     fig.add_vline(
         x=threshold,
         line_dash="dot",
-        line_color="#A23B3B",
+        line_color=theme.danger(),
         annotation_text=f"Threshold: {threshold:.0f}%",
         annotation_position="top",
     )
@@ -257,10 +250,10 @@ def render_peer_bar(df: pd.DataFrame, threshold: float) -> go.Figure:
         height=max(320, 30 * len(df)),
         xaxis_title="Public holding, % of total outstanding units (latest filing)",
         yaxis_title=None,
-        font=dict(family=CHART_FONT, color="#1A2433"),
+        font=dict(family=CHART_FONT, color=theme.text_color()),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="#EAF0F5"),
+        xaxis=dict(gridcolor=theme.grid_color()),
     )
     return fig
 

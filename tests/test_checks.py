@@ -51,10 +51,10 @@ class TestAssetRatioStatus:
 
     def test_thresholds_as_configured(self):
         below = investment.asset_ratio_status(79.9, 100.0)
-        assert below.startswith("🔴") and "< 80%" in below
-        assert investment.asset_ratio_status(80.0, 100.0).startswith("🟢")
+        assert below.startswith("✖") and "< 80%" in below
+        assert investment.asset_ratio_status(80.0, 100.0).startswith("✔")
         assert "81-85%" in investment.asset_ratio_status(83.0, 100.0)
-        assert investment.asset_ratio_status(90.0, 100.0).startswith("🟢")
+        assert investment.asset_ratio_status(90.0, 100.0).startswith("✔")
 
     def test_a_reported_zero_is_a_real_zero(self):
         assert "< 80%" in investment.asset_ratio_status(0.0, 100.0)
@@ -182,7 +182,7 @@ class TestValuationTenure:
 
     def test_within_four_years(self):
         out = valuation.evaluate_rows(_valuer_rows("01/04/2022"), self.IND, self.ENT)
-        assert bool(out["Tenure within limit"].iloc[0]) and out["Tenure Status"].iloc[0].startswith("✅")
+        assert bool(out["Tenure within limit"].iloc[0]) and out["Tenure Status"].iloc[0].startswith("✔")
 
     def test_over_four_years(self):
         out = valuation.evaluate_rows(_valuer_rows("01/04/2018"), self.IND, self.ENT)

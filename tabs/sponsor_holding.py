@@ -10,25 +10,12 @@ from utils.common import (
     _find_col, _num_series, _standardize_selector_columns, _to_date,
     load_table_url,
 )
-from utils import rules  # every threshold lives in utils/rules.py
+from utils import periods, rules, status  # every threshold lives in utils/rules.py
+from utils.status import CheckResult, Status
 
 # ---------- helpers ----------
 
-def _fy_end_date(fy: str):
-    """'2019-20' -> 2020-03-31, '2024-25' -> 2025-03-31, '2020' -> 2020-03-31.
-    None when the text isn't a financial year (it used to return today's date, silently changing the answer)."""
-    if not isinstance(fy, str):
-        fy = str(fy or "")
-    fy = fy.strip()
-    try:
-        if "-" in fy:
-            a, b = fy.split("-", 1)
-            end_year = int("20" + b[-2:]) if len(b) == 2 else int(b)
-        else:
-            end_year = int(fy)
-        return date(end_year, 3, 31)
-    except Exception:
-        return None
+_fy_end_date = periods.fy_end_date  # kept under the old name; the logic lives in utils/periods.py
 
 def _years_between(d1: date, d2: date) -> float:
     return abs((d2 - d1).days) / 365.25
@@ -90,7 +77,7 @@ def sponsor_public_status(s_pct: float, p_pct: float, list_dt, fy_end, fy_label:
     Rule 2 (Reg. 14(2A)): after that the public holding must be at least the minimum public unitholding."""
     if fy_end is None:
         return "warning", f"The financial year '{fy_label}' could not be read, so the minimum-holding rule cannot be applied.", None
-    if not isinstance(list_dt, date):
+    if not isinstance(list_dt, date) or pd.isna(list_dt):  # pd.NaT is an instance of date, so test for it too
         return "warning", "The listing date is missing, so it is not known which minimum-holding rule applies. Not checked.", None
 
     sponsor_min, sponsor_years = rules.SPONSOR_MIN_INITIAL, rules.SPONSOR_MIN_INITIAL_YEARS
@@ -118,6 +105,25 @@ def sponsor_public_status(s_pct: float, p_pct: float, list_dt, fy_end, fy_label:
     return "success", f"After {py} years — minimum public unitholding (≥ {pb}) satisfied.", False
 
 
+AREA = "Sponsor & public holding"
+
+
+def summary_results(entity: str) -> list:
+    """Scorecard verdict for a REIT's latest financial year (Reg. 11(3) / 14(2A) minimum holdings)."""
+    df = _load_sponsor_df(DEFAULT_REIT_SPON_URL)
+    rows = df[df[ENT_COL] == entity]
+    fy = periods.latest_fy(rows[FY_COL].dropna().astype(str))
+    if rows.empty or fy is None:
+        return [CheckResult("Minimum unitholding", Status.NO_DATA, "No sponsor holding rows for this entity", AREA)]
+    row = rows[rows[FY_COL].astype(str) == fy].iloc[0]
+    level, message, within_initial = sponsor_public_status(
+        float(row.get("Sponsor+Group %", float("nan"))), float(row.get("Public %", float("nan"))),
+        row.get("__listing_dt__", None), _fy_end_date(fy), fy)
+    rule_key = "sponsor.min_initial" if within_initial else "public.min"
+    check = "Sponsor + group minimum (first years)" if within_initial else "Minimum public unitholding"
+    return [CheckResult(check, status.from_alert(level), f"FY {fy}: {message}", AREA, rule_key)]
+
+
 def _sort_fy(values):
     return sorted(values, key=lambda fy: _fy_end_date(str(fy)) or date.max)
 
@@ -134,7 +140,7 @@ def _stacked_meter_html(s_pct: float, p_pct: float) -> str:
     return f"""
 <style>
 .sp-meter .legend {{
-  display:flex; gap:28px; align-items:center; margin:0 0 10px 0; color:#1f2937;
+  display:flex; flex-wrap:wrap; gap:8px 28px; align-items:center; margin:0 0 10px 0; color:inherit;
   font-size:1.02rem; font-weight:700;
 }}
 .sp-meter .swatch {{
@@ -143,9 +149,9 @@ def _stacked_meter_html(s_pct: float, p_pct: float) -> str:
 }}
 .sp-meter .sponsor-swatch {{ background:#2F80ED; }}
 .sp-meter .public-swatch  {{ background:#27AE60; }}
-.sp-meter .pct {{ font-weight:800; margin-left:8px; color:#111827; }}
+.sp-meter .pct {{ font-weight:800; margin-left:8px; color:inherit; }}
 .sp-meter .track {{
-  position: relative; height:16px; background:#e9eef5; border-radius:10px; overflow:hidden;
+  position: relative; height:16px; background:rgba(128,128,128,0.25); border-radius:10px; overflow:hidden;
 }}
 .sp-meter .seg {{ position:absolute; top:0; height:100%; }}
 .sp-meter .sponsor {{ left:0; background:#2F80ED; }}
@@ -239,7 +245,7 @@ def render():
     fy_end = _fy_end_date(fy)
 
     level, message, within_initial = sponsor_public_status(s_pct, p_pct, list_dt, fy_end, fy)
-    getattr(st, level)(message)
+    getattr(st, level)(message, icon=status.ICON[status.from_alert(level)])
     if within_initial is None:
         return
     st.caption("Thresholds and their sources are listed on the Rules reference page. The graded sponsor minimum after year 3 "

@@ -55,31 +55,63 @@ EPS = 1e-9
 
 # ---------- Styling ----------
 def inject_global_css():
+    """Styles shared by every page. Colours are translucent tints over the theme's own background and
+    the text keeps the theme's text colour, so the same CSS is readable in light and dark mode."""
     st.markdown(
         """
         <style>
+          /* ---- cards / hero ---- */
           .app-hero {
-            padding: 14px 18px;
-            border-radius: 14px;
-            border: 1px solid rgba(0,0,0,0.06);
-            background: linear-gradient(180deg, rgba(25,118,210,0.08) 0%, rgba(25,118,210,0.03) 100%);
-            margin-bottom: 14px;
-            text-align: center;
-            max-width: 900px;
-            margin-left: auto;
-            margin-right: auto;
+            padding: 14px 18px; border-radius: 14px; margin: 0 auto 14px auto; max-width: 900px; text-align: center;
+            border: 1px solid rgba(128,128,128,0.30);
+            background: linear-gradient(180deg, rgba(25,118,210,0.12) 0%, rgba(25,118,210,0.04) 100%);
           }
           .big-title { font-size: 1.9rem; font-weight: 700; margin: 0; line-height: 1.2; text-align:center; }
-          .subtle { color: var(--text-color-secondary, #6b7280); margin-top: 6px; text-align:center; }
-          .card {
-            padding: 14px 16px; border-radius: 12px; background: rgba(255,255,255,0.7);
-            border: 1px solid rgba(0,0,0,0.06);
+          .subtle, .muted { opacity: 0.75; }
+          .subtle { margin-top: 6px; text-align:center; }
+          .card { padding: 14px 16px; border-radius: 12px; background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.30); }
+          .kpi { padding: 12px 14px; border-radius: 12px; color: #fff; background: linear-gradient(135deg, #1976D2, #115293); }
+
+          /* ---- status badges: glyph + word (never colour alone); the tint is decoration ---- */
+          .badge {
+            display: inline-flex; align-items: center; gap: 0.35em; padding: 0.15em 0.65em; border-radius: 999px;
+            border: 1px solid; font-size: 0.85rem; font-weight: 600; line-height: 1.5; white-space: nowrap;
           }
-          .kpi {
-            padding: 12px 14px; border-radius: 12px; color: #fff;
-            background: linear-gradient(135deg, #1976D2, #115293);
+          .badge-pass    { border-color: #2E9E62; background: rgba(46,158,98,0.16); }
+          .badge-fail    { border-color: #D64545; background: rgba(214,69,69,0.16); }
+          .badge-review  { border-color: #D9930D; background: rgba(217,147,13,0.18); }
+          .badge-no_data { border-color: #7A8798; background: rgba(122,135,152,0.16); }
+          .badge-na      { border-color: rgba(122,135,152,0.55); background: transparent; opacity: 0.85; }
+
+          /* ---- overview table ---- */
+          .sc-wrap { overflow-x: auto; margin: 0.5rem 0 0.75rem 0; }
+          table.scorecard { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+          table.scorecard th, table.scorecard td { padding: 0.55rem 0.75rem; border-bottom: 1px solid rgba(128,128,128,0.30); text-align: left; }
+          table.scorecard thead th { font-weight: 700; border-bottom: 2px solid rgba(128,128,128,0.55); white-space: nowrap; }
+          table.scorecard tbody th { font-weight: 600; }
+          table.scorecard tbody tr:hover { background: rgba(128,128,128,0.08); }
+
+          /* ---- headline numbers ---- */
+          .stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 0.75rem; margin: 0.5rem 0 1rem 0; }
+          .stat { padding: 0.6rem 0.9rem; border-radius: 10px; border: 1px solid rgba(128,128,128,0.30); background: rgba(128,128,128,0.06); }
+          .stat-n { font-size: 1.9rem; font-weight: 700; line-height: 1.1; }
+          .stat-l { font-size: 0.9rem; opacity: 0.85; }
+
+          /* ---- accessibility ---- */
+          .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+          a:focus-visible, button:focus-visible, [role="tab"]:focus-visible { outline: 3px solid #4C9AFF; outline-offset: 2px; }
+          @media (max-width: 640px) {
+            .big-title { font-size: 1.5rem; }
+            h1 { font-size: 1.9rem !important; }
+            .stat-strip { grid-template-columns: repeat(2, 1fr); }
+            /* the overview table becomes one card per REIT: name on top, each area's verdict on its own line */
+            table.scorecard, table.scorecard thead, table.scorecard tbody, table.scorecard tr, table.scorecard th, table.scorecard td { display: block; }
+            table.scorecard thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+            table.scorecard tr { border: 1px solid rgba(128,128,128,0.30); border-radius: 10px; margin-bottom: 0.75rem; padding: 0.25rem 0.5rem; }
+            table.scorecard tbody th { border-bottom: 1px solid rgba(128,128,128,0.30); }
+            table.scorecard td { display: flex; justify-content: space-between; align-items: center; border-bottom: none; }
+            table.scorecard td::before { content: attr(data-label); font-weight: 600; margin-right: 1rem; }
           }
-          .muted { color: #6b7280; }
         </style>
         """,
         unsafe_allow_html=True,

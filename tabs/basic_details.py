@@ -32,7 +32,7 @@ def _split_list(val) -> List[str]:
 
 def _popover_or_expander(label: str):
     """Use popover if available (Streamlit ≥ 1.31), else expander."""
-    return st.popover(label, use_container_width=True) if hasattr(st, "popover") else st.expander(label, expanded=False)
+    return st.popover(label, width="stretch") if hasattr(st, "popover") else st.expander(label, expanded=False)
 
 def _details_md(items: Dict[str, str]) -> str:
     lines = []
@@ -277,12 +277,12 @@ def render():
         """
         <style>
         .dir-card {
-          border: 1px solid rgba(0,0,0,.08);
-          background: #0f5e7610;
+          border: 1px solid rgba(128,128,128,.35);
+          background: rgba(15,94,118,.12);
           border-radius: 12px; padding: 10px 12px; margin-bottom: 8px;
         }
         .dir-title {
-          font-size: .92rem; font-weight: 600; color: #0f172a; text-align:center;
+          font-size: .92rem; font-weight: 600; color: inherit; text-align:center;
           margin-bottom: 6px;
         }
         </style>

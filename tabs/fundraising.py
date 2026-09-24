@@ -199,7 +199,7 @@ def render():
                 color=alt.Color(f"{FY_COL}:N", legend=None, scale=alt.Scale(range=palette_fy)),
                 tooltip=[alt.Tooltip(FY_COL, title="FY"), alt.Tooltip("Amount of Fund Raised (num)", title="Amount", format=",")],
             ).properties(height=300).configure_axis(grid=True, gridOpacity=0.12))
-        st.altair_chart(c_fy, use_container_width=True)
+        st.altair_chart(c_fy, width="stretch")
 
     ent_chart_df = (fdf.groupby(ENT_COL, as_index=False)["Amount of Fund Raised (num)"].sum()
         .sort_values("Amount of Fund Raised (num)", ascending=False).head(12))
@@ -211,11 +211,11 @@ def render():
                 color=alt.Color(f"{ENT_COL}:N", legend=None, scale=alt.Scale(range=palette_ent)),
                 tooltip=[alt.Tooltip(ENT_COL, title="Entity"), alt.Tooltip("Amount of Fund Raised (num)", title="Amount", format=",")],
             ).properties(height=360).configure_axis(grid=True, gridOpacity=0.12))
-        st.altair_chart(c_ent, use_container_width=True)
+        st.altair_chart(c_ent, width="stretch")
     st.markdown("---")
 
     st.markdown("### Records")
-    st.dataframe(fdf, use_container_width=True, hide_index=True)
+    st.dataframe(fdf, width="stretch", hide_index=True)
 
     export_df = fdf.rename(columns={ENT_COL: "Entity", FY_COL: "Financial Year"})
     st.download_button("Download filtered data (CSV)", data=export_df.to_csv(index=False).encode("utf-8"),

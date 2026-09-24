@@ -9,7 +9,8 @@ from utils.common import (
     _find_col, _num_series, _standardize_selector_columns, _quarter_sort,
     _url, load_table_url, resolve_percent_units
 )
-from utils import rules  # every threshold lives in utils/rules.py
+from utils import periods, rules, status  # every threshold lives in utils/rules.py
+from utils.status import CheckResult, Status
 
 def _process_borrowings_df(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
@@ -122,7 +123,8 @@ def _alerts_and_sections(row, ruleset: str):
         return False
     return True
 
-def _check_compliance_alerts(row, ruleset: str):
+def compliance_gaps(row, ruleset: str) -> list:
+    """Credit rating / unitholder approval items that are required at this NBR but missing in the row."""
     cols = row.index
     cra1_rating = row.get(_find_col(cols, aliases=["Credit Rating CRA1"]))
     cra2_rating = row.get(_find_col(cols, aliases=["Credit Rating CRA2"]))
@@ -134,8 +136,11 @@ def _check_compliance_alerts(row, ruleset: str):
     unit_taken = _is_yes(unitholder_approval_val)
 
     nbr = row.get("NBR_ratio", 0.0) or 0.0
-    missing = missing_compliance_items(nbr, ruleset, credit_taken_any, aaa_ok, unit_taken)
+    return missing_compliance_items(nbr, ruleset, credit_taken_any, aaa_ok, unit_taken)
 
+
+def _check_compliance_alerts(row, ruleset: str):
+    missing = compliance_gaps(row, ruleset)
     if missing:
         msg = f"Both {missing[0]} and {missing[1]} are not taken/available." if len(missing) == 2 else f"{missing[0]} is not taken/available."
         st.error(f"ALERT: {msg} for this period.")
@@ -183,6 +188,39 @@ def _render_unitholder_and_compliances_ui(row):
     # Additional Compliances part
     st.write(f"**Whether NBR > 25% due to market movement?** {row.get('Whether NBR>25% on account of market movement?', '-')}")
     st.write(f"**Date of intimation to Trustee**: {row.get('Date Of intimation to Trustee (fmt)', '-')}")
+
+
+AREA = "Borrowings"
+
+
+def summary_results(entity: str) -> list:
+    """Scorecard verdicts for a REIT's latest reported quarter: the net-borrowings cap and, when the NBR is
+    high enough to need them, credit rating and unitholder approval."""
+    df = load_borrowings_url(DEFAULT_REIT_BORR_URL)
+    rows = df[df[ENT_COL] == entity]
+    fy = periods.latest_fy(rows[FY_COL].dropna().astype(str))
+    if rows.empty or fy is None:
+        return [CheckResult("Net borrowings", Status.NO_DATA, "No borrowings rows for this entity", AREA)]
+    in_fy = rows[rows[FY_COL].astype(str) == fy]
+    qtr = periods.latest_quarter(in_fy[QTR_COL].dropna().astype(str))
+    row = in_fy[in_fy[QTR_COL].astype(str) == qtr].iloc[0]
+    when = f"{fy} {qtr}"
+    nbr = row.get("NBR_ratio", None)
+    if not isinstance(nbr, (int, float)) or pd.isna(nbr):
+        return [CheckResult("Net borrowings", Status.NO_DATA, f"{when}: NBR not available", AREA)]
+
+    cap = nbr_cap("reit")
+    over = nbr_over_cap(nbr, "reit")
+    results = [CheckResult(
+        f"Net borrowings within {cap*100:.0f}% cap", Status.FAIL if over else Status.PASS,
+        f"{when}: NBR {nbr*100:.2f}%" + (f" exceeds the {cap*100:.0f}% cap (Reg. 20(2))" if over else ""), AREA, "borrowings.reit_cap")]
+    if compliance_sections_required(nbr, "reit"):
+        missing = compliance_gaps(row, "reit")
+        results.append(CheckResult(
+            "Credit rating and unitholder approval", Status.FAIL if missing else Status.PASS,
+            f"{when}: NBR is {nbr*100:.2f}% (over {rules.REIT_NBR_TRIGGER*100:.0f}%), " + (f"missing: {', '.join(missing)}" if missing else "credit rating and unitholder approval are in place"),
+            AREA, "borrowings.reit_trigger"))
+    return results
 
 
 def render():

@@ -1,26 +1,13 @@
+# app.py  -- entry point: page setup, theme styles, navigation
 import streamlit as st
-from utils.common import inject_global_css
 
-st.set_page_config(page_title="REIT / InvIT Dashboard", page_icon="📊", layout="wide")
+st.set_page_config(page_title="REIT / InvIT Dashboard", page_icon=":material/monitoring:", layout="wide")
+
+from utils import navigation  # noqa: E402
+from utils.chrome import render_data_banner  # noqa: E402
+from utils.common import inject_global_css  # noqa: E402
+
 inject_global_css()
-
-st.markdown("""
-<div class="app-hero">
-  <div class="big-title">REIT / InvIT Dashboard</div>
-  <div class="subtle">Borrowings, Fund Raising, Trading, and NDCF.</div>
-</div>
-""", unsafe_allow_html=True)
-
-st.write("Jump to a section:")
-st.page_link("pages/1_Basic_Details.py", label="Basic Details", icon="📇")
-st.page_link("pages/2_Fund_Raising.py", label="Fund Raising", icon="💰")
-st.page_link("pages/3_Borrowings.py",   label="Borrowings",   icon="🏦")
-st.page_link("pages/4_Trading.py",      label="Trading",      icon="📈")
-st.page_link("pages/5_NDCF.py",         label="NDCF",         icon="📄")
-st.page_link("pages/6_Sponsor_Holding.py",         label="Sponsor Holding",         icon="🧩")
-st.page_link("pages/7_Governance.py",         label="Governance",         icon="🧭")
-st.page_link("pages/8_Valuation.py",         label="Valuation",         icon="📐")
-st.page_link("pages/9_Related_Party.py",         label="Related Party",         icon="🤝")
-st.page_link("pages/10_Investment.py",         label="Investment Conditions",         icon="💰")
-st.page_link("pages/11_Unit_Holding_Pattern.py", label="Unit Holding Pattern", icon="🧮")
-st.page_link("pages/12_Rules_Reference.py", label="Rules reference", icon="📜")
+page = st.navigation(navigation.build(), position="sidebar", expanded=True)
+render_data_banner()
+page.run()

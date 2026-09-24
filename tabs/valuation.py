@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-from utils import rules  # every threshold lives in utils/rules.py
+from utils import periods, rules, status  # every threshold lives in utils/rules.py
+from utils.status import CheckResult, Status
 
 # ------------------------------------------------------------
 # Config & helpers from your common utilities
@@ -19,7 +20,6 @@ from utils.common import (
     DEFAULT_REIT_FUND_URL,
     DEFAULT_INVIT_FUND_URL,
     ENT_COL,
-    inject_global_css,
     load_table_url,
     _standardize_selector_columns,
     _find_col,
@@ -158,15 +158,16 @@ def evaluate_rows(df: pd.DataFrame, ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFra
     out["IBBI Registered?"] = pd.array([m[0] for m in matches], dtype="boolean")  # <NA> = registry unavailable
     out["Matched Type"] = [m[1] for m in matches]
     out["Tenure Status"] = out["Tenure within limit"].map(
-        lambda ok: "⚪ Insufficient data" if pd.isna(ok) else ("✅ OK" if ok else f"❌ > {rules.VALUER_MAX_TENURE_YEARS} years")
+        lambda ok: status.tag(Status.NO_DATA, "Insufficient data") if pd.isna(ok) else (
+            status.tag(Status.PASS, "OK") if ok else status.tag(Status.FAIL, f"> {rules.VALUER_MAX_TENURE_YEARS} years"))
     )
 
     def ibbi_status(m):
         if m[0] is None:
-            return "⚠️ Registry unavailable"
+            return status.tag(Status.REVIEW, "Registry unavailable")
         if m[0]:
-            return "✅ Found in registry"
-        return f"❌ {m[2]}" if m[2] else "❌ Not found"
+            return status.tag(Status.PASS, "Found in registry")
+        return status.tag(Status.FAIL, m[2] or "Not found")
 
     out["IBBI Status"] = [ibbi_status(m) for m in matches]
     return out
@@ -223,8 +224,8 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
         if pd.notna(s) and pd.notna(e):
             diff = (e - s).days
             if diff > rules.VALUATION_REPORT_MAX_DAYS:
-                return f"❌ {diff} days ({label})"
-            return f"✅ {diff} days" # Show days even for pass
+                return status.tag(Status.FAIL, f"{diff} days ({label})")
+            return status.tag(Status.PASS, f"{diff} days")  # Show days even for pass
         return "-"
 
     if col_report + "_dt" in out.columns:
@@ -282,12 +283,12 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
                     (val_rows[col_report + "_dt"] <= f_date)
                 ].sort_values(col_report + "_dt", ascending=False)
                 
-                status = "❌ Fail"
+                verdict = status.tag(Status.FAIL)
                 last_val_date = None
                 days_prior = None
                 
                 if not valid_vals.empty:
-                    status = "✅ Pass"
+                    verdict = status.tag(Status.PASS)
                     last_val_date = valid_vals.iloc[0][col_report + "_dt"]
                     days_prior = (f_date - last_val_date).days
                 
@@ -297,7 +298,7 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
                     "Issue Type": f_row.get(type_col, "-"),
                     "Latest Valuation Date": last_val_date.date() if last_val_date else "Not Found",
                     "Days Prior": days_prior if days_prior is not None else "-",
-                    "Status": status
+                    "Status": verdict
                 })
     
     df_fund_checks = pd.DataFrame(fund_checks)
@@ -307,9 +308,44 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
 # ------------------------------------------------------------
 # UI
 # ------------------------------------------------------------
+AREA = "Valuation"
+
+
+def summary_results(entity: str) -> list:
+    """Scorecard verdicts for the valuers of a REIT's latest financial year: tenure and IBBI registration."""
+    df = load_valuation_sheet(DEFAULT_VALUATION_URL)
+    rows = df[df["Name of REIT"] == entity] if not df.empty else df
+    fy = periods.latest_fy(rows["Financial Year"].dropna().astype(str)) if not rows.empty else None
+    if fy is None:
+        return [CheckResult("Valuers", Status.NO_DATA, "No valuer rows for this entity", AREA)]
+    try:
+        ind, ent, _ = load_ibbi()
+    except (DataUnavailable, FileNotFoundError, KeyError, ValueError):
+        ind = ent = pd.DataFrame(columns=["reg_no", "name", "status"])
+    out = evaluate_rows(rows[rows["Financial Year"].astype(str) == fy], ind, ent)
+
+    tenure = out["Tenure within limit"]
+    if (tenure == False).any():  # noqa: E712
+        t_status, t_msg = Status.FAIL, f"a valuer has been in place more than {rules.VALUER_MAX_TENURE_YEARS} years"
+    elif tenure.isna().any():
+        t_status, t_msg = Status.NO_DATA, "appointment date missing for a valuer"
+    else:
+        t_status, t_msg = Status.PASS, "all valuers within the tenure limit"
+    reg = out["IBBI Registered?"]
+    if (reg == False).any():  # noqa: E712
+        r_status, r_msg = Status.FAIL, "a valuer is not currently registered with IBBI"
+    elif reg.isna().any():
+        r_status, r_msg = Status.REVIEW, "IBBI registry not available"
+    else:
+        r_status, r_msg = Status.PASS, "all valuers found in the IBBI registry"
+    return [
+        CheckResult(f"Valuer tenure ≤ {rules.VALUER_MAX_TENURE_YEARS} years", t_status, f"FY {fy}: {t_msg}", AREA, "valuation.tenure_years"),
+        CheckResult("Valuer registered with IBBI", r_status, f"FY {fy}: {r_msg}", AREA),
+    ]
+
+
 def render():
     st.header("Valuation")
-    inject_global_css()
 
     with st.sidebar:
         st.subheader("Select Segment")
@@ -372,7 +408,7 @@ def render():
                              "Date of Appointment", "Date of Resignation", "Tenure (years)", 
                              "Tenure Status", "IBBI Status", "Matched Type"]
                 show_cols = [c for c in view_cols if c in eval_df.columns]
-                st.dataframe(eval_df[show_cols].sort_values(["Financial Year", "Name of Valuer"], na_position="last"), use_container_width=True, hide_index=True)
+                st.dataframe(eval_df[show_cols].sort_values(["Financial Year", "Name of Valuer"], na_position="last"), width="stretch", hide_index=True)
 
                 breaches_tenure = eval_df[~eval_df["Tenure within limit"].fillna(True)]
                 breaches_ibbi   = eval_df[~eval_df["IBBI Registered?"].fillna(True)]
@@ -380,10 +416,10 @@ def render():
                     st.markdown("### Alerts")
                     if not breaches_tenure.empty:
                         st.error(f"Tenure > {rules.VALUER_MAX_TENURE_YEARS} years: {len(breaches_tenure)} row(s).")
-                        st.dataframe(breaches_tenure[show_cols], use_container_width=True, hide_index=True)
+                        st.dataframe(breaches_tenure[show_cols], width="stretch", hide_index=True)
                     if not breaches_ibbi.empty:
                         st.error(f"IBBI registration not found or cancelled: {len(breaches_ibbi)} row(s).")
-                        st.dataframe(breaches_ibbi[show_cols], use_container_width=True, hide_index=True)
+                        st.dataframe(breaches_ibbi[show_cols], width="stretch", hide_index=True)
 
     # ========================== TAB 2: Timelines & Compliance ==========================
     with tab_compliance:
@@ -405,14 +441,14 @@ def render():
             check_cols = [c for c in checked_df.columns if c.startswith("Check:")]
             
             if not checked_df.empty:
-                st.dataframe(checked_df[base_cols + check_cols], use_container_width=True, hide_index=True)
+                st.dataframe(checked_df[base_cols + check_cols], width="stretch", hide_index=True)
                 
                 err_mask = False
-                for c in check_cols: err_mask |= checked_df[c].astype(str).str.contains("❌")
+                for c in check_cols: err_mask |= checked_df[c].astype(str).str.startswith(status.GLYPH[Status.FAIL])
                 timeline_errors = checked_df[err_mask]
                 if not timeline_errors.empty:
                     st.error(f"Found {len(timeline_errors)} timeline violations.")
-                    st.dataframe(timeline_errors[base_cols + check_cols], use_container_width=True, hide_index=True)
+                    st.dataframe(timeline_errors[base_cols + check_cols], width="stretch", hide_index=True)
             else:
                 st.info("No data for timeline checks.")
 
@@ -425,7 +461,7 @@ def render():
                 if selected_fy != "All": f_alerts_show = f_alerts_show[f_alerts_show["Financial Year"] == selected_fy]
                 if not f_alerts_show.empty:
                     st.error(f"Found {len(f_alerts_show)} missing valuation reports.")
-                    st.dataframe(f_alerts_show, use_container_width=True, hide_index=True)
+                    st.dataframe(f_alerts_show, width="stretch", hide_index=True)
                 else:
                     st.success("All required frequencies found for selection.")
             else:
@@ -441,7 +477,7 @@ def render():
                 if selected_entity != "All": f_checks_show = f_checks_show[f_checks_show["Name of REIT"] == selected_entity]
                 
                 # Show full table of evidence
-                st.dataframe(f_checks_show, use_container_width=True, hide_index=True)
+                st.dataframe(f_checks_show, width="stretch", hide_index=True)
                 
                 # Show alerts if any failures
                 failures = f_checks_show[f_checks_show["Status"].str.contains("Fail")]

@@ -102,9 +102,9 @@ class TestValuationThresholds:
 
     def test_report_submission_limit(self, monkeypatch):
         df, fund = self._frames()
-        assert "❌" in valuation.check_timelines_and_completeness(df, fund)[0]["Check: Trustee Submission"].iloc[0]
+        assert "✖" in valuation.check_timelines_and_completeness(df, fund)[0]["Check: Trustee Submission"].iloc[0]
         monkeypatch.setattr(rules, "VALUATION_REPORT_MAX_DAYS", 30)
-        assert "✅" in valuation.check_timelines_and_completeness(df, fund)[0]["Check: Trustee Submission"].iloc[0]
+        assert "✔" in valuation.check_timelines_and_completeness(df, fund)[0]["Check: Trustee Submission"].iloc[0]
 
     def test_valuation_before_fundraising_window(self, monkeypatch):
         df, fund = self._frames()
@@ -116,14 +116,14 @@ class TestValuationThresholds:
 # -------------------------------------------------------------------------- investment
 class TestSpvHoldingLimit:
     def test_limit_and_label(self, monkeypatch):
-        assert investment.spv_holding_status({"Shareholder A": 60.0}).startswith("🔴")
-        assert investment.spv_holding_status({"Shareholder A": 50.0}).startswith("🟢")  # at the limit is fine
+        assert investment.spv_holding_status({"Shareholder A": 60.0}).startswith("✖")
+        assert investment.spv_holding_status({"Shareholder A": 50.0}).startswith("✔")  # at the limit is fine
         monkeypatch.setattr(rules, "SPV_HOLDING_MAX_PCT", 70.0)
         out = investment.spv_holding_status({"Shareholder A": 60.0})
-        assert out.startswith("🟢") and "70%" in out
+        assert out.startswith("✔") and "70%" in out
 
     def test_no_figures_is_no_data_not_a_pass(self):
-        assert investment.spv_holding_status({}).startswith("⚪")
+        assert investment.spv_holding_status({}).startswith("?")
 
 
 # -------------------------------------------------------------------------- borrowings
@@ -201,6 +201,7 @@ class TestSponsorHoldingThresholds:
         assert sponsor_holding.sponsor_public_status(nan, 0.5, LISTED, FY_END_2Y)[0] == "info"
         assert sponsor_holding.sponsor_public_status(0.5, nan, LISTED, FY_END_OLD)[0] == "info"
         assert sponsor_holding.sponsor_public_status(0.5, 0.5, None, FY_END_2Y)[0] == "warning"
+        assert sponsor_holding.sponsor_public_status(0.5, 0.5, pd.NaT, FY_END_2Y)[0] == "warning"  # a blank sheet cell
         assert sponsor_holding.sponsor_public_status(0.5, 0.5, LISTED, None, "FY??")[0] == "warning"
 
 
@@ -218,9 +219,9 @@ class TestGovernanceThresholds:
 
     @pytest.mark.parametrize("evaluate", ["evaluate_audit", "evaluate_nrc"])
     @pytest.mark.parametrize("share, independent, total, expected", [
-        ((3, 4), 2, 4, "🔴"),  # 2 of 4 = 50% < 3/4; a hard-coded numerator of 2 would pass this (8 >= 8)
-        ((1, 2), 1, 3, "🔴"),  # 1 of 3 < 1/2; a hard-coded denominator of 3 would pass this (3 >= 3)
-        ((1, 2), 2, 3, "🟢"),
+        ((3, 4), 2, 4, "✖ Fail"),  # 2 of 4 = 50% < 3/4; a hard-coded numerator of 2 would pass this (8 >= 8)
+        ((1, 2), 1, 3, "✖ Fail"),  # 1 of 3 < 1/2; a hard-coded denominator of 3 would pass this (3 >= 3)
+        ((1, 2), 2, 3, "✔ Pass"),
     ])
     def test_independent_share_numerator_and_denominator(self, monkeypatch, evaluate, share, independent, total, expected):
         monkeypatch.setattr(rules, "COMMITTEE_INDEPENDENT_SHARE", share)

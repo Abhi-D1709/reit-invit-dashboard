@@ -5,7 +5,6 @@ from utils.common import (
     RPT_REIT_SHEET_URL,
     DEFAULT_REIT_BORR_URL,
     ENT_COL, FY_COL, QTR_COL,
-    inject_global_css,
     load_table_url,
     parse_number,
     _standardize_selector_columns
@@ -61,7 +60,6 @@ def load_rpt_data():
 
 def render():
     st.header("Related Party Transactions")
-    inject_global_css()
 
     # 1. Load Data
     sheets, borrowings_df = load_rpt_data()
@@ -131,7 +129,7 @@ def render():
                 if reason_col in ceased_rows.columns:
                     cols_to_show.append(reason_col)
                     
-                st.dataframe(ceased_rows[cols_to_show], use_container_width=True, hide_index=True)
+                st.dataframe(ceased_rows[cols_to_show], width="stretch", hide_index=True)
             else:
                 st.info(f"No related parties ceased in {selected_fy} for {selected_entity}.")
         else:
@@ -155,7 +153,7 @@ def render():
         
         if not df2_filtered.empty:
             st.error("Check this transaction further")
-            st.dataframe(df2_filtered, use_container_width=True, hide_index=True)
+            st.dataframe(df2_filtered, width="stretch", hide_index=True)
         else:
             st.info(f"No Unitholder Approvals found in {selected_fy} for {selected_entity}.")
     else:
@@ -177,7 +175,7 @@ def render():
         df3_filtered = df_s3[mask_s3].copy()
         
         if not df3_filtered.empty:
-            st.dataframe(df3_filtered, use_container_width=True, hide_index=True)
+            st.dataframe(df3_filtered, width="stretch", hide_index=True)
         
         if selected_fy == "All":
             st.info("Please select a specific Financial Year to calculate the RPT Intensity Metric.")
@@ -236,7 +234,7 @@ def render():
         target_col = "If Yes, Date of Untiholder Approval"
         
         if target_col in df4_filtered.columns:
-            st.dataframe(df4_filtered, use_container_width=True, hide_index=True)
+            st.dataframe(df4_filtered, width="stretch", hide_index=True)
             has_entry = (
                 df4_filtered[target_col].notna() & 
                 (df4_filtered[target_col].astype(str).str.strip() != "") & 
@@ -249,7 +247,7 @@ def render():
                 st.success("No Unitholder Approval entries found (Column H).")
         else:
             st.warning(f"Column '{target_col}' not found in Sheet4.")
-            st.dataframe(df4_filtered, use_container_width=True, hide_index=True)
+            st.dataframe(df4_filtered, width="stretch", hide_index=True)
     else:
         st.info("No data available in Sheet4.")
 
@@ -278,7 +276,7 @@ def render():
                     acquisition_status(parse_number(r[col_txn]), parse_number(r[col_v1]), parse_number(r[col_v2]))
                     for _, r in df5_filtered.iterrows()
                 ]
-                st.dataframe(df5_filtered, use_container_width=True, hide_index=True)
+                st.dataframe(df5_filtered, width="stretch", hide_index=True)
                 failures = df5_filtered[df5_filtered["Check Status"] == "Fail"]
                 insufficient = df5_filtered[df5_filtered["Check Status"] == "Insufficient data"]
                 if not failures.empty:
@@ -294,7 +292,7 @@ def render():
                 st.info(f"No acquisition transactions found in {selected_fy} for {selected_entity}.")
         else:
             st.warning("Required columns (Value of Transaction, Valuation 1, Valuation 2) not found in Sheet5.")
-            st.dataframe(df5_filtered, use_container_width=True, hide_index=True)
+            st.dataframe(df5_filtered, width="stretch", hide_index=True)
     else:
         st.info("No data available in Sheet5.")
 
@@ -328,7 +326,7 @@ def render():
                 display_cols.append("Financial Year")
             display_cols.extend(existing_cols)
             
-            st.dataframe(df6_filtered[display_cols], use_container_width=True, hide_index=True)
+            st.dataframe(df6_filtered[display_cols], width="stretch", hide_index=True)
         else:
             st.info(f"No disclosure records found in {selected_fy} for {selected_entity}.")
     else:
