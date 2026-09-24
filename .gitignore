@@ -15,3 +15,6 @@ data_cache/
 
 # machine-generated data lives on the "data" branch (checked out here as a worktree)
 /data/
+
+# local secrets: never commit (the hosted app uses the host's Secrets settings)
+.streamlit/secrets.toml

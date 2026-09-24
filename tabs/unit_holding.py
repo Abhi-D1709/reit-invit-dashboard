@@ -313,6 +313,75 @@ def render_peer_benchmarking(index_label: str, master_df: pd.DataFrame):
     )
 
 
+def render_trend_section(entity_df: pd.DataFrame, name: str) -> None:
+    st.subheader(f"Sponsor vs public holding trend — {name}", icon=":material/trending_up:")
+
+    threshold = st.slider(
+        "Minimum public holding threshold (%)",
+        min_value=5,
+        max_value=75,
+        value=25,
+        step=1,
+        key="uhp_entity_threshold",
+        help=(
+            "User-defined reference line, not an asserted regulatory figure. SEBI's prescribed minimum "
+            "public unitholding for REITs/InvITs can vary by trust size and listing vintage — set the "
+            "threshold applicable to this trust."
+        ),
+    )
+    breach_df = entity_df[entity_df["publicHoldingPer"] < threshold].sort_values("asOnDate", ascending=False)
+
+    if len(entity_df) < 2:
+        st.caption("Only one filing available for this entity — no trend to show.")
+    else:
+        with st.container(border=True):
+            st.plotly_chart(render_trend(entity_df, threshold=threshold), width="stretch")
+
+    if breach_df.empty:
+        st.success(
+            f"Public holding has stayed at or above {threshold:.0f}% in every filing on record for this entity.",
+            icon=":material/check_circle:",
+        )
+    else:
+        st.warning(
+            f"Public holding fell below {threshold:.0f}% in {len(breach_df)} of {len(entity_df)} filing(s) on record.",
+            icon=":material/warning:",
+        )
+
+    st.dataframe(
+        entity_df[["asOnDate", "sponsorGroupPer", "publicHoldingPer", "submissionDate"]]
+        .sort_values("asOnDate", ascending=False)
+        .rename(
+            columns={
+                "asOnDate": "As on date",
+                "sponsorGroupPer": "Sponsor & sponsor group %",
+                "publicHoldingPer": "Public holding %",
+                "submissionDate": "Submission date",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_without_xbrl(record, as_on_date, entity_df, entity) -> None:
+    """A filing the exchange published without an XBRL document: summary percentages only."""
+    with st.container(border=True):
+        st.markdown(f"##### {record['secLname']}")
+        st.markdown(f":blue-badge[{record['source']}: {record['ndsSymbol']}]")
+        st.markdown(f"**As on date**  \n{as_on_date}")
+    st.info(
+        "The exchange published only the summary percentages for this filing (no XBRL document), so the "
+        "detailed tables, category breakdown and domestic/foreign split are not available for this date.",
+        icon=":material/info:",
+    )
+    with st.container(horizontal=True):
+        st.metric("Sponsor & sponsor group holding", f"{record['sponsorGroupPer']:.2f}%", border=True)
+        st.metric("Public holding", f"{record['publicHoldingPer']:.2f}%", border=True)
+    st.divider()
+    render_trend_section(entity_df, record["secLname"])
+
+
 def render():
     st.title("Unit Holding Pattern Analysis", icon=":material/account_balance:")
     st.caption("REITs & InvITs listed on NSE and BSE — SEBI-prescribed Unit Holding Pattern format")
@@ -325,12 +394,17 @@ def render():
         index_label = index_label or "InvITs"
         index = "invits" if index_label == "InvITs" else "reits"
 
-        master_df, problems = get_master_df(index)
+        try:
+            master_df, problems = get_master_df(index)
+        except filing_source.DataUnavailable as e:
+            st.error(f"Filings are not available yet: {e}")
+            st.stop()
+        st.caption(f":material/schedule: {filing_source.data_status()}")
         for problem in problems:
             st.warning(problem, icon=":material/warning:")
 
         if master_df.empty:
-            st.error("No filings returned for this index. NSE may be blocking the request; try Refresh in a minute.")
+            st.error("No filings are available for this index yet.")
             st.stop()
 
         view_mode = st.segmented_control(
@@ -345,7 +419,11 @@ def render():
 
             entity_df = master_df[master_df["entityKey"] == entity]
             dates = entity_df.sort_values("asOnDateParsed", ascending=False)["asOnDate"].tolist()
-            as_on_date = st.selectbox("As on date", dates, key="uhp_asof")
+            has_xbrl = dict(zip(entity_df["asOnDate"], entity_df["xbrlFile"] != ""))
+            as_on_date = st.selectbox(
+                "As on date", dates, key="uhp_asof",
+                format_func=lambda d: d if has_xbrl.get(d, True) else f"{d}  (summary only)",
+            )
 
             st.caption(f":material/history: {len(entity_df)} filing(s) available for this entity")
             source = entity_df["source"].iloc[0]
@@ -365,7 +443,10 @@ def render():
         return
 
     record = entity_df[entity_df["asOnDate"] == as_on_date].iloc[0]
-    xml_text = filing_source.fetch_xbrl(record["xbrlFilePath"])
+    if not record["xbrlFile"]:
+        _render_without_xbrl(record, as_on_date, entity_df, entity)
+        return
+    xml_text = filing_source.fetch_xbrl(record["xbrlFile"])
     parsed = parse_uhp_xbrl(xml_text)
     header_info = sebi_format.build_header_info(parsed)
 
@@ -535,54 +616,7 @@ def render():
                         st.write(row["Brief Profile"])
 
     with tab_trend:
-        st.subheader(f"Sponsor vs public holding trend — {header_info.get('Name of the Entity') or entity}", icon=":material/trending_up:")
-
-        threshold = st.slider(
-            "Minimum public holding threshold (%)",
-            min_value=5,
-            max_value=75,
-            value=25,
-            step=1,
-            key="uhp_entity_threshold",
-            help=(
-                "User-defined reference line, not an asserted regulatory figure. SEBI's prescribed minimum "
-                "public unitholding for REITs/InvITs can vary by trust size and listing vintage — set the "
-                "threshold applicable to this trust."
-            ),
-        )
-        breach_df = entity_df[entity_df["publicHoldingPer"] < threshold].sort_values("asOnDate", ascending=False)
-
-        if len(entity_df) < 2:
-            st.caption("Only one filing available for this entity — no trend to show.")
-        else:
-            with st.container(border=True):
-                st.plotly_chart(render_trend(entity_df, threshold=threshold), width="stretch")
-
-        if breach_df.empty:
-            st.success(
-                f"Public holding has stayed at or above {threshold:.0f}% in every filing on record for this entity.",
-                icon=":material/check_circle:",
-            )
-        else:
-            st.warning(
-                f"Public holding fell below {threshold:.0f}% in {len(breach_df)} of {len(entity_df)} filing(s) on record.",
-                icon=":material/warning:",
-            )
-
-        st.dataframe(
-            entity_df[["asOnDate", "sponsorGroupPer", "publicHoldingPer", "submissionDate"]]
-            .sort_values("asOnDate", ascending=False)
-            .rename(
-                columns={
-                    "asOnDate": "As on date",
-                    "sponsorGroupPer": "Sponsor & sponsor group %",
-                    "publicHoldingPer": "Public holding %",
-                    "submissionDate": "Submission date",
-                }
-            ),
-            width="stretch",
-            hide_index=True,
-        )
+        render_trend_section(entity_df, header_info.get('Name of the Entity') or entity)
 
     with tab_report:
         st.subheader("Export report", icon=":material/description:")

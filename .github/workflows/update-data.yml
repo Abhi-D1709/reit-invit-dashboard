@@ -42,9 +42,14 @@ jobs:
       - run: pip install -r jobs/requirements.txt
 
       - name: Ingest trading data
-        id: ingest
+        id: trades
         continue-on-error: true   # still publish whatever succeeded; errors are recorded in manifest.json
         run: python -m jobs.ingest_trades ${{ inputs.full && '--full' || '' }}
+
+      - name: Ingest unit holding filings
+        id: uhp
+        continue-on-error: true
+        run: python -m jobs.ingest_uhp
 
       - name: Commit data
         working-directory: data
@@ -59,8 +64,8 @@ jobs:
             git push origin HEAD:data
           fi
 
-      - name: Fail the run if ingest reported errors
-        if: steps.ingest.outcome == 'failure'
+      - name: Fail the run if any ingest reported errors
+        if: steps.trades.outcome == 'failure' || steps.uhp.outcome == 'failure'
         run: |
-          echo "Ingest finished with errors; see data/manifest.json."
+          echo "An ingest step finished with errors; see data/manifest.json."
           exit 1

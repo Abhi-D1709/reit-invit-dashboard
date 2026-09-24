@@ -9,6 +9,7 @@ set DATA_SOURCE=remote to force the remote copy.
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import io
 import json
 import os
@@ -91,3 +92,25 @@ def load_ibbi() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
         raise DataUnavailable("The IBBI registry has not been published to the data branch yet.")
     key = meta["generated_at"]
     return _load_ibbi_table("individuals", key), _load_ibbi_table("entities", key), meta
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _load_uhp_filings(generated_at: str) -> pd.DataFrame:
+    return pd.read_parquet(io.BytesIO(_read_bytes("uhp/filings.parquet")))
+
+
+def load_uhp_filings() -> pd.DataFrame:
+    """One row per (trust, as-on date): the latest Unit Holding Pattern filing. `xbrlFile` is
+    empty when the exchange published no XBRL document for that filing."""
+    meta = load_manifest().get("uhp")
+    if not meta:
+        raise DataUnavailable("Unit Holding Pattern filings have not been published to the data branch yet.")
+    return _load_uhp_filings(meta["generated_at"])
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def load_uhp_xbrl(name: str) -> str:
+    """XBRL text of one filing (immutable, so cached for a day)."""
+    if not name:
+        raise DataUnavailable("This filing has no XBRL document.")
+    return gzip.decompress(_read_bytes(f"uhp/xbrl/{name}.gz")).decode("utf-8")
