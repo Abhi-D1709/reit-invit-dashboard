@@ -21,6 +21,10 @@ Rules (same spirit as the other jobs):
     on demand). Older NSE filings often have no XBRL at all (the feed says ".../null"); they
     are kept with an empty xbrlFile, since their sponsor/public percentages still feed trends.
   * Only the latest submission per (trust, as-on date) is kept; BSE and NSE both re-file.
+  * BSE's archive API answers 403 to cloud hosts (GitHub Actions, Streamlit Cloud). That is
+    reported as a warning, not an error, and the manifest records when BSE-only trusts were
+    last refreshed. They file only ~4 times a year: run this job from a normal connection
+    (`python -m jobs.ingest_uhp`, then commit/push data/) to refresh them.
 """
 from __future__ import annotations
 
@@ -210,13 +214,15 @@ def _bse_record(scrip: int, name: str, index: str, symbol: str, row: dict, xbrl_
     }
 
 
-def bse_records(entities, xbrl_dir: Path, known_files: set[str], errors: list[str]) -> list[dict]:
-    jobs = []
+def bse_records(entities, xbrl_dir: Path, known_files: set[str], errors: list[str], blocked: list[str]) -> tuple[list[dict], int]:
+    """(records, number of trusts whose archive was read successfully)."""
+    jobs, reached = [], 0
     for scrip, name, index in entities:
         try:
             rows = _get("bse", BSE_ARCHIVE.format(scrip=scrip)).json().get("Table", [])
+            reached += 1
         except (RuntimeError, ValueError) as e:
-            errors.append(f"BSE archive for {name} ({scrip}): {e}")
+            (blocked if "403" in str(e) else errors).append(f"{name} ({scrip}): {e}")
             continue
         for row in rows:
             if not row.get("XBRL_Link"):
@@ -239,7 +245,7 @@ def bse_records(entities, xbrl_dir: Path, known_files: set[str], errors: list[st
             errors.append(err)
         else:
             out.append(rec)
-    return out
+    return out, reached
 
 
 # ------------------------------- shared --------------------------------------
@@ -301,8 +307,15 @@ def main() -> int:
     entities, warn = bse_only_entities()
     if warn:
         warnings.append(warn)
-    fresh += bse_records(entities, xbrl_dir, set(existing["xbrlFile"]) if len(existing) else set(), errors)
-    log(f"  {len(entities)} trusts, {sum(1 for r in fresh if r['source'] == 'BSE')} BSE filings")
+    blocked: list[str] = []
+    bse_recs, bse_reached = bse_records(entities, xbrl_dir, set(existing["xbrlFile"]) if len(existing) else set(), errors, blocked)
+    fresh += bse_recs
+    log(f"  {len(entities)} trusts, {len(bse_recs)} BSE filings read, {bse_reached} archive(s) reachable")
+    if blocked:
+        warnings.append(
+            f"BSE blocked the archive request for {len(blocked)} of {len(entities)} BSE-only trust(s) (HTTP 403, usual for cloud hosts); "
+            "their filings were not refreshed. Run `python -m jobs.ingest_uhp` from a normal connection to refresh them."
+        )
 
     # merge into what is stored; latest submission per (trust, as-on date) wins
     merged = pd.concat([f for f in (existing, pd.DataFrame(fresh, columns=COLUMNS)) if not f.empty], ignore_index=True)
@@ -323,8 +336,11 @@ def main() -> int:
     if len(existing) and len(merged) < len(existing):
         warnings.append(f"Stored filings fell from {len(existing)} to {len(merged)} (a superseded re-filing was replaced, or files went missing).")
 
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    prev_bse = manifest.get("uhp", {}).get("bse_last_refreshed")
     manifest["uhp"] = {
-        "generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "bse_last_refreshed": now if (bse_reached == len(entities) and entities) else prev_bse,
+        "generated_at": now,
         "filings": int(len(merged)),
         "entities": int(merged["ndsSymbol"].nunique()),
         "nse_filings": int((merged["source"] == "NSE").sum()),
