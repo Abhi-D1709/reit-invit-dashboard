@@ -77,7 +77,7 @@ def read_google_sheet_by_sheetname(url: str, sheet_name: str) -> pd.DataFrame:
     base = _base_from_view_url(url)
     q = _u.quote(sheet_name, safe="")
     csv_url = f"{base}/gviz/tq?tqx=out:csv&sheet={q}"
-    df = pd.read_csv(csv_url, dtype=str).applymap(_clean_str)
+    df = pd.read_csv(csv_url, dtype=str).map(_clean_str)
     return df
 
 
@@ -85,7 +85,7 @@ def read_google_sheet_by_sheetname(url: str, sheet_name: str) -> pd.DataFrame:
 def read_google_sheet_csv_default(url: str) -> pd.DataFrame:
     base = _base_from_view_url(url)
     csv_url = f"{base}/export?format=csv"
-    df = pd.read_csv(csv_url, dtype=str).applymap(_clean_str)
+    df = pd.read_csv(csv_url, dtype=str).map(_clean_str)
     return df
 
 
@@ -274,7 +274,7 @@ def _committee_size_from_comp(comp_now: pd.DataFrame, committee: str) -> int:
 
 
 def _parse_meeting_dates(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 
 def evaluate_meetings_for_committee(
@@ -527,7 +527,7 @@ def render() -> None:
         st.error(f"Missing columns in Sheet1 (composition): {missing}")
         st.dataframe(comp.head())
         return
-    comp = comp.applymap(_clean_str)
+    comp = comp.map(_clean_str)
 
     # Validate Sheet2 (optional)
     meetings_ok = False
@@ -541,7 +541,7 @@ def render() -> None:
         if miss2:
             st.warning(f"Sheet2 missing columns: {miss2}. Meeting checks disabled.")
         else:
-            meetings = meetings.applymap(_clean_str)
+            meetings = meetings.map(_clean_str)
             meetings_ok = True
 
     # Validate Sheet3 (optional)
@@ -554,7 +554,7 @@ def render() -> None:
         miss3 = [c for c in need3 if c not in board.columns]
         if miss3:
             st.warning(f"Sheet3 missing columns: {miss3}. Board checks may be partial.")
-        board = board.applymap(_clean_str)
+        board = board.map(_clean_str)
         board_ok = True
 
     # Validate Sheet4 (optional)
@@ -565,7 +565,7 @@ def render() -> None:
         if miss4:
             st.warning(f"Sheet4 missing columns: {miss4}. Independent Directors’ check disabled.")
         else:
-            ind = ind.applymap(_clean_str)
+            ind = ind.map(_clean_str)
             ind_ok = True
 
     # Selections

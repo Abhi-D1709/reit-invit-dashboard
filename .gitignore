@@ -9,3 +9,6 @@ venv/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# cached exchange filings
+data_cache/

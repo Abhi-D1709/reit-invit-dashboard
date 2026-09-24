@@ -1,5 +1,5 @@
-streamlit>=1.32
-pandas>=2.0
+streamlit>=1.57
+pandas>=2.1
 numpy>=1.24
 requests>=2.31
 altair>=5.0
@@ -9,3 +9,4 @@ lxml
 supabase>=2.4,<3
 python-dateutil
 openpyxl
+XlsxWriter>=3.2
