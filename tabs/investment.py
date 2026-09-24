@@ -9,6 +9,7 @@ from utils.common import (
     resolve_percent_units,
     _MISSING_TEXT,
 )
+from utils import rules  # every threshold lives in utils/rules.py
 
 NO_DATA = "⚪ N/A — insufficient data"
 
@@ -21,11 +22,25 @@ def asset_ratio_status(completed: float, total: float) -> str:
     if pd.isna(completed) or pd.isna(total) or total == 0:
         return NO_DATA
     ratio = (completed / total) * 100
-    if 81 <= ratio <= 85:
-        return f"🔴 {ratio:.2f}% (Alert: In 81-85% Bracket)"
-    if ratio >= 80:
+    minimum = rules.INVEST_COMPLETED_MIN_PCT
+    low, high = rules.INVEST_ALERT_BAND
+    if low <= ratio <= high:
+        return f"🔴 {ratio:.2f}% (Alert: In {low:g}-{high:g}% Bracket)"
+    if ratio >= minimum:
         return f"🟢 {ratio:.2f}% (No alert)"
-    return f"🔴 {ratio:.2f}% (Alert: < 80%)"
+    return f"🔴 {ratio:.2f}% (Alert: < {minimum:g}%)"
+
+def spv_holding_status(holdings: dict) -> str:
+    """Status text for the SPV shareholder check. `holdings` maps column name -> holding in percent points,
+    only for the columns that have a figure. No figures at all is "no data", not a pass."""
+    if not holdings:
+        return "⚪ No holding figures provided"
+    limit = rules.SPV_HOLDING_MAX_PCT
+    issues = [f"{col}: {val:g}% (> {limit:g}%)" for col, val in holdings.items() if val > limit]
+    if issues:
+        return "🔴 " + ", ".join(issues)
+    return f"🟢 All <= {limit:g}%"
+
 
 @st.cache_data(ttl=600, show_spinner="Loading Investment Data...")
 def load_investment_data():
@@ -83,7 +98,11 @@ def render():
 
     # 1. Asset Ratio Check
     st.subheader("1. Investment in Completed Assets (≥ 80%)")
-    st.caption("Rules: Target ≥ 80% (Green). **Exception:** Red Alert if ratio is between 81% and 85%.")
+    band_lo, band_hi = rules.INVEST_ALERT_BAND
+    st.caption(
+        f"Rules: Target ≥ {rules.INVEST_COMPLETED_MIN_PCT:g}% (Green; REIT Regulations, Reg. 18(4)). "
+        f"**Extra alert:** Red if the ratio is between {band_lo:g}% and {band_hi:g}% (a dashboard alert, not a regulatory limit)."
+    )
     
     if c_col and u_col:
         filtered["Asset Ratio Check"] = [
@@ -95,8 +114,8 @@ def render():
         
         # Check if any row triggered the specific 81-85% warning
         no_data = filtered["Asset Ratio Check"] == NO_DATA
-        if filtered["Asset Ratio Check"].str.contains("81-85% Bracket").any():
-            st.error("Alert: Some investments fall within the 81-85% warning bracket.")
+        if filtered["Asset Ratio Check"].str.contains("Bracket").any():
+            st.error(f"Alert: Some investments fall within the {band_lo:g}-{band_hi:g}% warning bracket.")
         elif filtered["Asset Ratio Check"].str.contains("🔴").any():
             st.error("Alert: Investment ratio below 80%.")
         if no_data.any():
@@ -124,12 +143,7 @@ def render():
 
                 def check_holdings(row):
                     known = {col: points[col].loc[row.name] for col in spv_hold_cols if not pd.isna(points[col].loc[row.name])}
-                    if not known:
-                        return "⚪ No holding figures provided"
-                    issues = [f"{col}: {val:g}% (> 50%)" for col, val in known.items() if val > 50]
-                    if issues:
-                        return "🔴 " + ", ".join(issues)
-                    return "🟢 All <= 50%"
+                    return spv_holding_status(known)
 
                 spv_rows["Holding Check"] = spv_rows.apply(check_holdings, axis=1)
 
@@ -141,7 +155,7 @@ def render():
                 if spv_rows["Holding Check"].str.contains("⚪").any():
                     st.info("Some rows give no SPV holding figures, so they could not be checked.")
                 elif not spv_rows["Holding Check"].str.contains("🔴").any():
-                    st.success("All SPV holdings are ≤ 50%.")
+                    st.success(f"All SPV holdings are ≤ {rules.SPV_HOLDING_MAX_PCT:g}%.")
             else:
                 st.warning("Could not find SPV Holding columns.")
         else:

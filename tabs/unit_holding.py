@@ -11,6 +11,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from utils import rules  # every threshold lives in utils/rules.py
+
 from utils.uhp import ownership_reports, peer_benchmark, reports, sebi_format
 from utils.uhp import sources as filing_source
 from utils.uhp.xbrl_parser import parse_uhp_xbrl, to_number
@@ -273,7 +275,7 @@ def render_peer_benchmarking(index_label: str, master_df: pd.DataFrame):
         "Minimum public holding threshold (%)",
         min_value=5,
         max_value=75,
-        value=25,
+        value=int(rules.PUBLIC_MIN * 100),
         step=1,
         key="uhp_peer_threshold",
         help=(
@@ -336,7 +338,7 @@ def render_trend_section(entity_df: pd.DataFrame, name: str) -> None:
         "Minimum public holding threshold (%)",
         min_value=5,
         max_value=75,
-        value=25,
+        value=int(rules.PUBLIC_MIN * 100),
         step=1,
         key="uhp_entity_threshold",
         help=(

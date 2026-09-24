@@ -10,6 +10,7 @@ from utils.common import (
     _find_col, _num_series, _standardize_selector_columns, _to_date,
     load_table_url,
 )
+from utils import rules  # every threshold lives in utils/rules.py
 
 # ---------- helpers ----------
 
@@ -78,6 +79,44 @@ def _load_sponsor_df(url: str) -> pd.DataFrame:
         "total": total_col,
     }
     return df
+
+def sponsor_public_status(s_pct: float, p_pct: float, list_dt, fy_end, fy_label: str = ""):
+    """Which minimum-holding rule applies at this FY end, and does the trust meet it?
+
+    Returns (level, message, within_initial). `level` is the name of the Streamlit call that shows the
+    message: "warning" (no rule could be chosen), "info" (insufficient data), "error" or "success".
+    `within_initial` is None when no rule could be chosen.
+    Rule 1 (Reg. 11(3)(i)): in the first years after listing the sponsor + sponsor group must hold a minimum.
+    Rule 2 (Reg. 14(2A)): after that the public holding must be at least the minimum public unitholding."""
+    if fy_end is None:
+        return "warning", f"The financial year '{fy_label}' could not be read, so the minimum-holding rule cannot be applied.", None
+    if not isinstance(list_dt, date):
+        return "warning", "The listing date is missing, so it is not known which minimum-holding rule applies. Not checked.", None
+
+    sponsor_min, sponsor_years = rules.SPONSOR_MIN_INITIAL, rules.SPONSOR_MIN_INITIAL_YEARS
+    public_min, public_years = rules.PUBLIC_MIN, rules.PUBLIC_MIN_DEADLINE_YEARS
+    sp, pb, sy, py = f"{sponsor_min*100:g}%", f"{public_min*100:g}%", f"{sponsor_years:g}", f"{public_years:g}"
+    years = _years_between(list_dt, fy_end)
+    within_initial = years < sponsor_years
+
+    if not within_initial and years < public_years:
+        # only possible if the two periods in utils/rules.py differ: the initial sponsor minimum has ended
+        # (the graded minimum is not checked) and the public deadline has not arrived yet
+        return "info", f"Beyond the first {sy} years and before the {py}-year public unitholding deadline: nothing is checked for this period.", False
+
+    if within_initial:
+        if math.isnan(s_pct):
+            return "info", f"Insufficient data: sponsor units or total units are missing, so the Sponsor+Group requirement (≥ {sp}) was not checked.", True
+        if (s_pct + EPS) < sponsor_min:
+            return "error", f"ALERT: Within first {sy} years of listing — Sponsor+Group holding is {s_pct*100:.2f}% (< {sp}).", True
+        return "success", f"Within first {sy} years of listing — Sponsor+Group requirement (≥ {sp}) satisfied.", True
+
+    if math.isnan(p_pct):
+        return "info", f"Insufficient data: sponsor units or total units are missing, so the minimum public unitholding (≥ {pb}) was not checked.", False
+    if (p_pct + EPS) < public_min:
+        return "error", f"ALERT: After {py} years — Public holding is {p_pct*100:.2f}% (< {pb}).", False
+    return "success", f"After {py} years — minimum public unitholding (≥ {pb}) satisfied.", False
+
 
 def _sort_fy(values):
     return sorted(values, key=lambda fy: _fy_end_date(str(fy)) or date.max)
@@ -199,32 +238,14 @@ def render():
     list_dt_display = row.get("Listing Date (display)", "-")
     fy_end = _fy_end_date(fy)
 
-    if fy_end is None:
-        st.warning(f"The financial year '{fy}' could not be read, so the minimum-holding rule cannot be applied.")
+    level, message, within_initial = sponsor_public_status(s_pct, p_pct, list_dt, fy_end, fy)
+    getattr(st, level)(message)
+    if within_initial is None:
         return
-    if not isinstance(list_dt, date):
-        st.warning("The listing date is missing, so it is not known which minimum-holding rule applies. Not checked.")
-        return
-    within_3yrs = _years_between(list_dt, fy_end) < 3.0
-
-    # Rule 1: first 3 years — Sponsor+Group ≥ 15%
-    if within_3yrs:
-        if math.isnan(s_pct):
-            st.info("Insufficient data: sponsor units or total units are missing, so the Sponsor+Group requirement (≥ 15%) was not checked.")
-        elif (s_pct + EPS) < 0.15:
-            st.error(f"ALERT: Within first 3 years of listing — Sponsor+Group holding is {s_pct*100:.2f}% (< 15%).")
-        else:
-            st.success("Within first 3 years of listing — Sponsor+Group requirement (≥ 15%) satisfied.")
-    # Rule 2: after 3 years — Public ≥ 25%
-    else:
-        if math.isnan(p_pct):
-            st.info("Insufficient data: sponsor units or total units are missing, so the minimum public unitholding (≥ 25%) was not checked.")
-        elif (p_pct + EPS) < 0.25:
-            st.error(f"ALERT: After 3 years — Public holding is {p_pct*100:.2f}% (< 25%).")
-        else:
-            st.success("After 3 years — minimum public unitholding (≥ 25%) satisfied.")
+    st.caption("Thresholds and their sources are listed on the Rules reference page. The graded sponsor minimum after year 3 "
+               "(Reg. 11(3)(ii)-(v)) is not checked here.")
 
     st.caption(
         f"Listing date: **{list_dt_display}**  •  FY end considered: **{fy_end.isoformat()}**  •  "
-        f"{'Within' if within_3yrs else 'Beyond'} first 3 years window."
+        f"{'Within' if within_initial else 'Beyond'} first {rules.SPONSOR_MIN_INITIAL_YEARS:g} years window."
     )

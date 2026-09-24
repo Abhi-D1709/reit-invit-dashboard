@@ -9,12 +9,7 @@ from utils.common import (
     _find_col, _num_series, _standardize_selector_columns, _quarter_sort,
     _url, load_table_url, resolve_percent_units
 )
-
-# --- Constants for Business Logic ---
-INVIT_NBR_CAP = 0.70
-INVIT_AAA_THRESHOLD = 0.49
-CREDIT_RATING_THRESHOLD = 0.25
-REIT_NBR_THRESHOLD = 0.25
+from utils import rules  # every threshold lives in utils/rules.py
 
 def _process_borrowings_df(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
@@ -75,18 +70,52 @@ def _render_card_breakup(row, m):
         - **D. Value of REIT Assets**: {row.get(d_label, "-")}
     """)
 
+def nbr_cap(ruleset: str) -> float:
+    """The net-borrowings cap for this kind of trust."""
+    return rules.INVIT_NBR_CAP if ruleset == "invit" else rules.REIT_NBR_CAP
+
+
+def nbr_over_cap(nbr: float, ruleset: str) -> bool:
+    """Net borrowings above the cap (REIT Regulations, Reg. 20(2) for REITs; InvIT rule as configured)."""
+    return nbr > nbr_cap(ruleset) + EPS
+
+
+def compliance_sections_required(nbr: float, ruleset: str) -> bool:
+    """Whether credit rating and unitholder approval apply at this NBR."""
+    if ruleset == "invit":
+        return nbr > rules.INVIT_RATING_TRIGGER + EPS
+    return nbr >= rules.REIT_NBR_TRIGGER - EPS  # REIT Regulations, Reg. 20(3)
+
+
+def missing_compliance_items(nbr: float, ruleset: str, credit_taken_any: bool, aaa_ok: bool, unit_taken: bool) -> list:
+    missing = []
+    if ruleset == "invit":
+        if nbr > rules.INVIT_AAA_THRESHOLD + EPS:
+            if not aaa_ok: missing.append("AAA Credit Rating")
+            if not unit_taken: missing.append("Unitholder Approval")
+        elif nbr > rules.INVIT_RATING_TRIGGER + EPS:
+            if not credit_taken_any: missing.append("Credit Rating")
+            if not unit_taken: missing.append("Unitholder Approval")
+    else: # reit
+        if not credit_taken_any: missing.append("Credit Rating")
+        if not unit_taken: missing.append("Unitholder Approval")
+    return missing
+
+
 def _alerts_and_sections(row, ruleset: str):
     nbr = row.get("NBR_ratio", None)
     if not isinstance(nbr, (int, float)) or pd.isna(nbr):
         st.info("NBR not available. Compliance sections cannot be displayed.")
         return False
 
-    if ruleset == "invit":
-        if nbr > INVIT_NBR_CAP + EPS:
-            st.error(f"ALERT: NBR is {float(nbr)*100:.2f}% which exceeds the {INVIT_NBR_CAP*100:.0f}% cap for InvITs.")
-        show_sections = (nbr > CREDIT_RATING_THRESHOLD + EPS)
-    else: # reit
-        show_sections = (nbr >= REIT_NBR_THRESHOLD - EPS)
+    if nbr_over_cap(nbr, ruleset):
+        kind = "InvITs" if ruleset == "invit" else "REITs"
+        msg = f"ALERT: NBR is {float(nbr)*100:.2f}% which exceeds the {nbr_cap(ruleset)*100:.0f}% cap for {kind}."
+        if ruleset != "invit":
+            msg += (" Under Reg. 20(4) a breach caused by market movements must be corrected within six months "
+                    "and the manager must inform the trustee (see the intimation date below).")
+        st.error(msg)
+    show_sections = compliance_sections_required(nbr, ruleset)
 
     if not show_sections:
         st.info("NBR is below the threshold. Credit Rating and Unitholder Approval sections are not required.")
@@ -104,18 +133,8 @@ def _check_compliance_alerts(row, ruleset: str):
     aaa_ok = _is_aaa(cra1_rating) or _is_aaa(cra2_rating)
     unit_taken = _is_yes(unitholder_approval_val)
 
-    missing = []
     nbr = row.get("NBR_ratio", 0.0) or 0.0
-    if ruleset == "invit":
-        if nbr > INVIT_AAA_THRESHOLD + EPS:
-            if not aaa_ok: missing.append("AAA Credit Rating")
-            if not unit_taken: missing.append("Unitholder Approval")
-        elif nbr > CREDIT_RATING_THRESHOLD + EPS:
-            if not credit_taken_any: missing.append("Credit Rating")
-            if not unit_taken: missing.append("Unitholder Approval")
-    else: # reit
-        if not credit_taken_any: missing.append("Credit Rating")
-        if not unit_taken: missing.append("Unitholder Approval")
+    missing = missing_compliance_items(nbr, ruleset, credit_taken_any, aaa_ok, unit_taken)
 
     if missing:
         msg = f"Both {missing[0]} and {missing[1]} are not taken/available." if len(missing) == 2 else f"{missing[0]} is not taken/available."

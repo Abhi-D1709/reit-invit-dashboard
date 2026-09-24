@@ -10,14 +10,13 @@ from utils.common import (
     parse_number,
     _standardize_selector_columns
 )
+from utils import rules  # every threshold lives in utils/rules.py
 
-ACQUISITION_LIMIT = 1.10  # transaction value must be <= 110% of the average of the two valuations
-
-
-def acquisition_status(txn: float, valuation_1: float, valuation_2: float, limit: float = ACQUISITION_LIMIT) -> str:
+def acquisition_status(txn: float, valuation_1: float, valuation_2: float, limit: float | None = None) -> str:
     """"Pass", "Fail" or "Insufficient data" for: value of transaction <= 110% of the average
     of the two valuations. A missing figure (blank, "-", "NA") is missing, not zero: reading it as
     0 made the limit 0 and reported "Fail" for every transaction without valuations."""
+    limit = rules.RPT_ACQUISITION_LIMIT if limit is None else limit
     if pd.isna(txn) or pd.isna(valuation_1) or pd.isna(valuation_2):
         return "Insufficient data"
     return "Pass" if txn <= (valuation_1 + valuation_2) / 2 * limit else "Fail"
@@ -260,7 +259,7 @@ def render():
     # SECTION 5: Sheet 5 Analysis (Acquisition Valuation Check)
     # -------------------------------------------------------------------------
     st.subheader("5. Acquisition Valuation Check")
-    st.caption("Condition: Value of Transaction <= 110% of Average (Valuation 1, Valuation 2)")
+    st.caption(f"Condition: Value of Transaction <= {rules.RPT_ACQUISITION_LIMIT*100:g}% of Average (Valuation 1, Valuation 2)")
 
     if not df_s5.empty and "Name of REIT" in df_s5.columns:
         mask_s5 = df_s5["Name of REIT"] == selected_entity
@@ -283,14 +282,14 @@ def render():
                 failures = df5_filtered[df5_filtered["Check Status"] == "Fail"]
                 insufficient = df5_filtered[df5_filtered["Check Status"] == "Insufficient data"]
                 if not failures.empty:
-                    st.error(f"Alert: {len(failures)} transaction(s) exceed the 110% valuation limit.")
+                    st.error(f"Alert: {len(failures)} transaction(s) exceed the {rules.RPT_ACQUISITION_LIMIT*100:g}% valuation limit.")
                 if not insufficient.empty:
                     st.info(
-                        f"{len(insufficient)} transaction(s) have no value or fewer than two valuations, so the 110% check "
+                        f"{len(insufficient)} transaction(s) have no value or fewer than two valuations, so the {rules.RPT_ACQUISITION_LIMIT*100:g}% check "
                         "could not be done for them (shown as 'Insufficient data')."
                     )
                 if failures.empty and insufficient.empty:
-                    st.success("All transactions are within the 110% valuation limit.")
+                    st.success(f"All transactions are within the {rules.RPT_ACQUISITION_LIMIT*100:g}% valuation limit.")
             else:
                 st.info(f"No acquisition transactions found in {selected_fy} for {selected_entity}.")
         else:

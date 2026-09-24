@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from utils import rules  # every threshold lives in utils/rules.py
+
 # ---------------------------- Defaults / wiring ------------------------------
 DEFAULT_SHEET_URL_TRUST = (
     "https://docs.google.com/spreadsheets/d/18QgoAV_gOQ1ShnVbXzz8bu3V3a1mflevB-foGh27gbA/edit?usp=sharing"
@@ -307,53 +309,131 @@ def compute_trust_checks(df: pd.DataFrame) -> pd.DataFrame:
 
     out = df.copy()
     out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
-    out["Meets 90% Rule"] = _tri(out["Payout Ratio %"] >= 90.0, out["Payout Ratio %"].isna())
+    out["Meets payout rule"] = _tri(out["Payout Ratio %"] >= rules.NDCF_PAYOUT_MIN_PCT, out["Payout Ratio %"].isna())
 
     # all four figures are needed; a missing one used to count as 0 and gave a made-up total
     out["CF Sum"] = out[[cfo, cfi, cff, pat]].sum(axis=1, min_count=4)
     out["Gap vs Computed"] = out["CF Sum"] - out[comp]
     out["Gap % of Computed"] = np.where(out[comp] != 0, (out["Gap vs Computed"] / out[comp]) * 100.0, np.nan).round(2)
-    out["Within 10% Gap"] = _tri(out["Gap % of Computed"].abs() <= 10.0, out["Gap % of Computed"].isna())
+    out["Within gap limit"] = _tri(out["Gap % of Computed"].abs() <= rules.NDCF_CF_GAP_MAX_PCT, out["Gap % of Computed"].isna())
     return out
 
 
+TIMELINE_COLUMNS = [
+    "Financial Year", "Period Ended", "Declaration Date", "Record Date", "Distribution Date", "Rule applied",
+    "Days Decl→Record", "Working days Decl→Record", "Record on time",
+    "Days Record→Distr", "Working days Record→Distr", "Distribution on time",
+    "Days Decl→Distr", "Distribution within limit", "Date check",
+]
+RULE_OLD = "15 days from declaration"
+RULE_NEW = "2 + 5 working days"
+
+
+def working_days_between(start: pd.Series, end: pd.Series) -> pd.Series:
+    """Working days (Monday to Friday) after `start` up to and including `end`; negative when `end` is earlier.
+    NaN when either date is missing. Market holidays are not excluded (no holiday calendar is kept)."""
+    valid = start.notna() & end.notna()
+    a = start.where(valid, pd.Timestamp("2000-01-03")).values.astype("datetime64[D]")
+    b = end.where(valid, pd.Timestamp("2000-01-03")).values.astype("datetime64[D]")
+    one = np.timedelta64(1, "D")
+    counted = np.busday_count(a + one, b + one)  # (start, end] == [start+1, end+1)
+    return pd.Series(counted, index=start.index).astype(float).where(valid)
+
+
+def _new_timeline_applies(declaration) -> bool:
+    """Distributions declared on or after the amendment date follow the working-day timeline."""
+    return bool(pd.notna(declaration) and declaration.date() >= rules.NDCF_NEW_TIMELINE_FROM)
+
+
+def _wd(start, end) -> float:
+    return float(working_days_between(pd.Series([start]), pd.Series([end])).iloc[0])
+
+
+def _timeline_is_sound(declaration, record, distribution) -> bool:
+    """Dates in order, and within whichever timeline applies to this declaration date."""
+    if not declaration <= record <= distribution:
+        return False
+    if _new_timeline_applies(declaration):
+        return _wd(declaration, record) <= rules.NDCF_RECORD_MAX_WORKING_DAYS and \
+            _wd(record, distribution) <= rules.NDCF_DISTRIBUTION_AFTER_RECORD_MAX_WORKING_DAYS
+    return (distribution - declaration).days <= rules.NDCF_DISTRIBUTION_MAX_DAYS
+
+
+def _swap_day_month(ts):
+    """The same date with day and month exchanged, or None when that isn't a valid date."""
+    if pd.isna(ts) or ts.day > 12:
+        return None
+    return pd.Timestamp(year=ts.year, month=ts.day, day=ts.month)
+
+
+def _swap_would_fix(declaration, record, distribution) -> bool:
+    """Would exchanging day and month on one or more of the three dates give a sound timeline?
+    (Dates typed as dd/mm in some cells and mm/dd in others are common in the source sheet.)"""
+    import itertools
+
+    options = [[d] + ([_swap_day_month(d)] if _swap_day_month(d) is not None else []) for d in (declaration, record, distribution)]
+    return any(
+        combo != (declaration, record, distribution) and _timeline_is_sound(*combo) for combo in itertools.product(*options)
+    )
+
+
+def _holiday_note(row) -> str:
+    """A small overrun of a working-day limit may just be a market holiday in the window."""
+    over = max(
+        row["Working days Decl→Record"] - rules.NDCF_RECORD_MAX_WORKING_DAYS,
+        row["Working days Record→Distr"] - rules.NDCF_DISTRIBUTION_AFTER_RECORD_MAX_WORKING_DAYS,
+    )
+    if 0 < over <= 2:
+        return f"Over the limit by {over:g} working day(s): a market holiday in the window, or a different way of counting the days, could explain it"
+    return ""
+
+
+def _date_check(row) -> str:
+    dates = (row["Declaration Date"], row["Record Date"], row["Distribution Date"])
+    if any(pd.isna(d) for d in dates):
+        return "Missing date(s)"
+    hint = " (a day/month swap would fix it)" if _swap_would_fix(*dates) else ""
+    days = (row["Days Decl→Record"], row["Days Record→Distr"], row["Days Decl→Distr"])
+    if any(d < 0 for d in days):
+        return "Dates out of order: check the sheet" + hint
+    if hint and not _timeline_is_sound(*dates):
+        return "Late as entered" + hint
+    if _new_timeline_applies(dates[0]):
+        return _holiday_note(row)
+    return ""
+
+
+def _gap_check(days: pd.Series, limit: float) -> pd.Series:
+    """True/False for a real gap. <NA> when a date is missing or the dates are out of order (a negative
+    gap): that is a data-entry error, not a late payment, and must not be reported as one."""
+    return _tri((days >= 0) & (days <= limit), days.isna() | (days < 0))
+
+
 def compute_trust_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
+    """Reg. 18(16)(c). Declared before rules.NDCF_NEW_TIMELINE_FROM: paid within 15 days of declaration.
+    Declared on or after it: record date within 2 working days of declaration and payment within 5 working
+    days of the record date. The checks of the other timeline are <NA> (not applicable)."""
     if not {"Declaration Date", "Record Date", "Distribution Date"}.issubset(df.columns):
-        return pd.DataFrame(
-            columns=[
-                "Financial Year",
-                "Period Ended",
-                "Declaration Date",
-                "Record Date",
-                "Distribution Date",
-                "Days Decl→Record",
-                "Record ≤ 2 days",
-                "Days Record→Distr",
-                "Distribution ≤ 5 days",
-            ]
-        )
+        return pd.DataFrame(columns=TIMELINE_COLUMNS)
     t = df.copy()
     t["Days Decl→Record"] = (t["Record Date"] - t["Declaration Date"]).dt.days
     t["Days Record→Distr"] = (t["Distribution Date"] - t["Record Date"]).dt.days
-    t["Record ≤ 2 days"] = _tri(
-        (t["Days Decl→Record"] >= 0) & (t["Days Decl→Record"] <= 2), t["Days Decl→Record"].isna()
-    )
-    t["Distribution ≤ 5 days"] = _tri(
-        (t["Days Record→Distr"] >= 0) & (t["Days Record→Distr"] <= 5), t["Days Record→Distr"].isna()
-    )
-    return t[
-        [
-            "Financial Year",
-            "Period Ended",
-            "Declaration Date",
-            "Record Date",
-            "Distribution Date",
-            "Days Decl→Record",
-            "Record ≤ 2 days",
-            "Days Record→Distr",
-            "Distribution ≤ 5 days",
-        ]
-    ].copy()
+    t["Days Decl→Distr"] = (t["Distribution Date"] - t["Declaration Date"]).dt.days
+    t["Working days Decl→Record"] = working_days_between(t["Declaration Date"], t["Record Date"])
+    t["Working days Record→Distr"] = working_days_between(t["Record Date"], t["Distribution Date"])
+    # If any two of the three dates are out of order the whole timeline is unreliable, so none of the
+    # three checks gives a verdict (which date is wrong is unknown).
+    out_of_order = (t[["Days Decl→Record", "Days Record→Distr", "Days Decl→Distr"]] < 0).any(axis=1)
+    new = t["Declaration Date"].map(_new_timeline_applies).astype(bool)
+    has_rule = t["Declaration Date"].notna()
+    t["Rule applied"] = np.where(~has_rule, "", np.where(new, RULE_NEW, RULE_OLD))
+    t["Record on time"] = _gap_check(t["Working days Decl→Record"], rules.NDCF_RECORD_MAX_WORKING_DAYS).mask(out_of_order | ~new)
+    t["Distribution on time"] = _gap_check(
+        t["Working days Record→Distr"], rules.NDCF_DISTRIBUTION_AFTER_RECORD_MAX_WORKING_DAYS
+    ).mask(out_of_order | ~new)
+    t["Distribution within limit"] = _gap_check(t["Days Decl→Distr"], rules.NDCF_DISTRIBUTION_MAX_DAYS).mask(out_of_order | new)
+    t["Date check"] = t.apply(_date_check, axis=1) if len(t) else pd.Series(dtype="object")
+    return t[TIMELINE_COLUMNS].copy()
 
 
 def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
@@ -372,7 +452,7 @@ def compute_spv_checks(df: pd.DataFrame) -> pd.DataFrame:
 
     out = df.copy()
     out["Payout Ratio %"] = np.where(out[comp] > 0, (out[decl] / out[comp]) * 100.0, np.nan).round(2)
-    out["Meets 90% Rule (SPV)"] = _tri(out["Payout Ratio %"] >= 90.0, out["Payout Ratio %"].isna())
+    out["Meets payout rule (SPV)"] = _tri(out["Payout Ratio %"] >= rules.NDCF_PAYOUT_MIN_PCT, out["Payout Ratio %"].isna())
 
     # The SPV's four figures are always needed. The HoldCo's four are needed only when there is a
     # HoldCo ("Leave Blank if N/A"); without one they contribute nothing.
@@ -453,21 +533,22 @@ def render():
         q = compute_trust_checks(q)
 
         total = int(len(q))
-        good_payout = int(q["Meets 90% Rule"].astype("boolean").fillna(False).sum())
-        good_gap = int(q["Within 10% Gap"].astype("boolean").fillna(False).sum())
+        good_payout = int(q["Meets payout rule"].astype("boolean").fillna(False).sum())
+        good_gap = int(q["Within gap limit"].astype("boolean").fillna(False).sum())
         c1, c2, c3 = st.columns(3)
-        c1.metric("TRUST: periods meeting 90% payout", f"{good_payout}/{total}")
-        c2.metric("TRUST: periods within 10% gap", f"{good_gap}/{total}")
+        c1.metric(f"TRUST: periods meeting {rules.NDCF_PAYOUT_MIN_PCT:g}% payout", f"{good_payout}/{total}")
+        c2.metric(f"TRUST: periods within {rules.NDCF_CF_GAP_MAX_PCT:g}% gap", f"{good_gap}/{total}")
         c3.metric("TRUST: rows analysed", f"{total}")
-        n_unknown_payout = int(q["Meets 90% Rule"].isna().sum())
-        n_unknown_gap = int(q["Within 10% Gap"].isna().sum())
+        n_unknown_payout = int(q["Meets payout rule"].isna().sum())
+        n_unknown_gap = int(q["Within gap limit"].isna().sum())
         if n_unknown_payout or n_unknown_gap:
             st.caption(
                 f"Insufficient data (shown as —): {n_unknown_payout} period(s) for the payout check and "
                 f"{n_unknown_gap} for the cash-flow gap check. They are not counted as passes or failures."
             )
 
-        st.subheader("Trust Check 1 — 90% payout of Computed NDCF (period-wise)")
+        st.subheader(f"Trust Check 1 — {rules.NDCF_PAYOUT_MIN_PCT:g}% payout of Computed NDCF (period-wise)")
+        st.caption("SEBI REIT Regulations, Reg. 18(16)(b): not less than 90% of net distributable cash flows to unitholders.")
         disp1 = q[
             [
                 "Financial Year",
@@ -475,14 +556,15 @@ def render():
                 "Total Amount of NDCF computed as per NDCF Statement",
                 "Total Amount of NDCF declared for the period (incl. Surplus)",
                 "Payout Ratio %",
-                "Meets 90% Rule",
+                "Meets payout rule",
             ]
         ].copy()
-        disp1["Meets 90% Rule"] = disp1["Meets 90% Rule"].map(_status)
+        disp1["Meets payout rule"] = disp1["Meets payout rule"].map(_status)
         st.dataframe(disp1, use_container_width=True, hide_index=True)
-        if (~q["Meets 90% Rule"].astype("boolean").fillna(True)).any():
+        if (~q["Meets payout rule"].astype("boolean").fillna(True)).any():
             st.error(
-                "TRUST: One or more periods do **not** meet the 90% payout requirement (Declared incl. surplus < 90% of Computed NDCF)."
+                f"TRUST: One or more periods do **not** meet the {rules.NDCF_PAYOUT_MIN_PCT:g}% payout requirement "
+                f"(Declared incl. surplus < {rules.NDCF_PAYOUT_MIN_PCT:g}% of Computed NDCF)."
             )
 
         st.subheader("Trust Check 2 — (CFO + CFI + CFF + PAT) gap vs Computed NDCF (period-wise)")
@@ -498,36 +580,79 @@ def render():
                 "Total Amount of NDCF computed as per NDCF Statement",
                 "Gap vs Computed",
                 "Gap % of Computed",
-                "Within 10% Gap",
+                "Within gap limit",
             ]
         ].copy()
-        disp2["Within 10% Gap"] = disp2["Within 10% Gap"].map(_status)
+        disp2["Within gap limit"] = disp2["Within gap limit"].map(_status)
         st.dataframe(disp2, use_container_width=True, hide_index=True)
-        if (~q["Within 10% Gap"].astype("boolean").fillna(True)).any():
-            st.error("TRUST: One or more periods have a gap **> 10%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
+        if (~q["Within gap limit"].astype("boolean").fillna(True)).any():
+            st.error(f"TRUST: One or more periods have a gap **> {rules.NDCF_CF_GAP_MAX_PCT:g}%** between (CFO + CFI + CFF + PAT) and Computed NDCF.")
 
         # -------- Split timeline checks into two separate tables ----------
         tline = compute_trust_timeline_checks(q)
         if tline.empty:
             st.info("Declaration / Record / Distribution columns not found; timeline checks skipped.")
         else:
-            st.subheader("Trust Check 3 — Declaration → Record Date (≤ 2 days)")
-            t1 = tline[
-                ["Financial Year", "Period Ended", "Declaration Date", "Record Date", "Days Decl→Record", "Record ≤ 2 days"]
-            ].copy()
-            t1["Record ≤ 2 days"] = t1["Record ≤ 2 days"].map(_status)
-            st.dataframe(t1, use_container_width=True, hide_index=True)
-            if (tline["Record ≤ 2 days"] == False).any():
-                st.error("TRUST: One or more periods have **Record Date more than 2 days after Declaration**.")
+            date_problems = tline[tline["Date check"] != ""]
+            if not date_problems.empty:
+                st.warning(
+                    f"{len(date_problems)} period(s) have missing or impossible dates in the sheet (for example a distribution date before "
+                    "the declaration date, often day and month typed the wrong way round). They show as — in the checks below "
+                    "and are **not** counted as late payments. Please correct the dates in the sheet.",
+                    icon=":material/warning:",
+                )
+                with st.expander("Periods with date problems"):
+                    st.dataframe(
+                        date_problems[["Financial Year", "Period Ended", "Declaration Date", "Record Date", "Distribution Date", "Date check"]],
+                        use_container_width=True, hide_index=True,
+                    )
 
-            st.subheader("Trust Check 4 — Record Date → Distribution Date (≤ 5 days)")
-            t2 = tline[
-                ["Financial Year", "Period Ended", "Record Date", "Distribution Date", "Days Record→Distr", "Distribution ≤ 5 days"]
+            st.caption(
+                f"Distribution timeline (REIT Regulations, Reg. 18(16)(c)): declared before {rules.NDCF_NEW_TIMELINE_FROM:%d %b %Y}, "
+                f"payment within {rules.NDCF_DISTRIBUTION_MAX_DAYS} days of declaration; declared on or after that date, record date within "
+                f"{rules.NDCF_RECORD_MAX_WORKING_DAYS} working days of declaration and payment within "
+                f"{rules.NDCF_DISTRIBUTION_AFTER_RECORD_MAX_WORKING_DAYS} working days of the record date. Each period is checked against the "
+                "rule for its declaration date; a check that does not apply shows n/a. Working days are Monday to Friday (market "
+                "holidays are not excluded)."
+            )
+
+            def _shown(check_col):
+                """Status text, with n/a where the check belongs to the other timeline (a date problem shows —)."""
+                applicable = tline["Rule applied"].eq(RULE_NEW) if check_col != "Distribution within limit" else tline["Rule applied"].eq(RULE_OLD)
+                return tline[check_col].map(_status).where(~(tline[check_col].isna() & tline["Rule applied"].ne("") & ~applicable), "n/a")
+
+            st.subheader(f"Trust Check 3 — Declaration → Record Date (≤ {rules.NDCF_RECORD_MAX_WORKING_DAYS} working days, from {rules.NDCF_NEW_TIMELINE_FROM:%d %b %Y})")
+            t1 = tline[
+                ["Financial Year", "Period Ended", "Declaration Date", "Record Date", "Rule applied", "Days Decl→Record", "Working days Decl→Record", "Record on time", "Date check"]
             ].copy()
-            t2["Distribution ≤ 5 days"] = t2["Distribution ≤ 5 days"].map(_status)
+            t1["Record on time"] = _shown("Record on time")
+            st.dataframe(t1, use_container_width=True, hide_index=True)
+            if (tline["Record on time"] == False).any():
+                st.error(f"TRUST: One or more periods have **Record Date more than {rules.NDCF_RECORD_MAX_WORKING_DAYS} working days after Declaration**.")
+
+            st.subheader(f"Trust Check 4 — Record Date → Distribution Date (≤ {rules.NDCF_DISTRIBUTION_AFTER_RECORD_MAX_WORKING_DAYS} working days, from {rules.NDCF_NEW_TIMELINE_FROM:%d %b %Y})")
+            t2 = tline[
+                ["Financial Year", "Period Ended", "Record Date", "Distribution Date", "Rule applied", "Days Record→Distr", "Working days Record→Distr", "Distribution on time", "Date check"]
+            ].copy()
+            t2["Distribution on time"] = _shown("Distribution on time")
             st.dataframe(t2, use_container_width=True, hide_index=True)
-            if (tline["Distribution ≤ 5 days"] == False).any():
-                st.error("TRUST: One or more periods have **Distribution Date more than 5 days after Record Date**.")
+            if (tline["Distribution on time"] == False).any():
+                st.error(f"TRUST: One or more periods have **Distribution Date more than {rules.NDCF_DISTRIBUTION_AFTER_RECORD_MAX_WORKING_DAYS} working days after Record Date**.")
+
+            st.subheader(f"Trust Check 5 — Declaration → Distribution Date (≤ {rules.NDCF_DISTRIBUTION_MAX_DAYS} days, declared before {rules.NDCF_NEW_TIMELINE_FROM:%d %b %Y})")
+            t3 = tline[
+                ["Financial Year", "Period Ended", "Declaration Date", "Distribution Date", "Rule applied", "Days Decl→Distr", "Distribution within limit", "Date check"]
+            ].copy()
+            t3["Distribution within limit"] = _shown("Distribution within limit")
+            st.dataframe(t3, use_container_width=True, hide_index=True)
+            if (tline["Distribution within limit"] == False).any():
+                st.error(
+                    f"TRUST: One or more periods have **Distribution Date more than {rules.NDCF_DISTRIBUTION_MAX_DAYS} days after Declaration** "
+                    "(REIT Regulations, Reg. 18(16)(c); late payment also carries interest at 15% p.a., which is not calculated here)."
+                )
+            checked = tline[["Record on time", "Distribution on time", "Distribution within limit"]]
+            if (tline["Rule applied"].ne("") & checked.isna().all(axis=1)).any():
+                st.info("Periods shown as — have missing or out-of-order dates, so the timeline could not be checked for them.")
 
     # ------------------------------ SPV LEVEL ---------------------------------
     else:
@@ -542,7 +667,7 @@ def render():
 
         q = compute_spv_checks(q)
 
-        st.subheader("SPV Check 1 — Declared (incl. Surplus) ≥ 90% of Computed NDCF (by SPV/period)")
+        st.subheader(f"SPV Check 1 — Declared (incl. Surplus) ≥ {rules.NDCF_PAYOUT_MIN_PCT:g}% of Computed NDCF (by SPV/period)")
         disp_s1 = q[
             [
                 "Name of SPV",
@@ -552,13 +677,13 @@ def render():
                 "Total Amount of NDCF computed as per NDCF Statement",
                 "Total Amount of NDCF declared for the period (incl. Surplus)",
                 "Payout Ratio %",
-                "Meets 90% Rule (SPV)",
+                "Meets payout rule (SPV)",
             ]
         ].copy()
-        disp_s1["Meets 90% Rule (SPV)"] = disp_s1["Meets 90% Rule (SPV)"].map(_status)
+        disp_s1["Meets payout rule (SPV)"] = disp_s1["Meets payout rule (SPV)"].map(_status)
         st.dataframe(disp_s1, use_container_width=True, hide_index=True)
-        if (~q["Meets 90% Rule (SPV)"].astype("boolean").fillna(True)).any():
-            st.error("SPV: One or more SPV periods do **not** meet the 90% payout requirement.")
+        if (~q["Meets payout rule (SPV)"].astype("boolean").fillna(True)).any():
+            st.error(f"SPV: One or more SPV periods do **not** meet the {rules.NDCF_PAYOUT_MIN_PCT:g}% payout requirement.")
 
         st.subheader("SPV Check 2 — |(SPV+HoldCo CFO+CFI+CFF+PAT) − Computed NDCF| < Computed NDCF")
         disp_s2 = q[

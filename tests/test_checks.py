@@ -78,24 +78,24 @@ def _trust_frame(**over):
 class TestNdcfTrust:
     def test_complete_row(self):
         out = ndcf.compute_trust_checks(_trust_frame())
-        assert bool(out["Meets 90% Rule"].iloc[0]) is True
-        assert out["CF Sum"].iloc[0] == 100.0 and bool(out["Within 10% Gap"].iloc[0]) is True
+        assert bool(out["Meets payout rule"].iloc[0]) is True
+        assert out["CF Sum"].iloc[0] == 100.0 and bool(out["Within gap limit"].iloc[0]) is True
 
     def test_declared_below_90_percent_fails(self):
         out = ndcf.compute_trust_checks(_trust_frame(**{DECL: 80.0}))
-        assert bool(out["Meets 90% Rule"].iloc[0]) is False
+        assert bool(out["Meets payout rule"].iloc[0]) is False
 
     def test_missing_declared_amount_is_insufficient_not_a_failure(self):
         out = ndcf.compute_trust_checks(_trust_frame(**{DECL: nan}))
-        assert pd.isna(out["Meets 90% Rule"].iloc[0])
+        assert pd.isna(out["Meets payout rule"].iloc[0])
 
     def test_missing_cash_flow_component_gives_no_made_up_total(self):
         out = ndcf.compute_trust_checks(_trust_frame(**{CFI: nan}))  # used to count as 0
-        assert pd.isna(out["CF Sum"].iloc[0]) and pd.isna(out["Within 10% Gap"].iloc[0])
+        assert pd.isna(out["CF Sum"].iloc[0]) and pd.isna(out["Within gap limit"].iloc[0])
 
     def test_non_positive_computed_ndcf_is_insufficient(self):
         out = ndcf.compute_trust_checks(_trust_frame(**{COMP: 0.0}))
-        assert pd.isna(out["Meets 90% Rule"].iloc[0])
+        assert pd.isna(out["Meets payout rule"].iloc[0])
 
 
 class TestNdcfTimeline:
@@ -111,17 +111,18 @@ class TestNdcfTimeline:
             }
         )
 
+    # declarations on or after 27 Nov 2024 follow the 2 + 5 working-day timeline
     def test_on_time(self):
-        out = ndcf.compute_trust_timeline_checks(self._frame("2024-05-01", "2024-05-02", "2024-05-06"))
-        assert bool(out["Record ≤ 2 days"].iloc[0]) and bool(out["Distribution ≤ 5 days"].iloc[0])
+        out = ndcf.compute_trust_timeline_checks(self._frame("2025-01-06", "2025-01-07", "2025-01-10"))
+        assert bool(out["Record on time"].iloc[0]) and bool(out["Distribution on time"].iloc[0])
 
     def test_late(self):
-        out = ndcf.compute_trust_timeline_checks(self._frame("2024-05-01", "2024-05-10", "2024-05-30"))
-        assert out["Record ≤ 2 days"].iloc[0] == False and out["Distribution ≤ 5 days"].iloc[0] == False  # noqa: E712
+        out = ndcf.compute_trust_timeline_checks(self._frame("2025-01-06", "2025-01-15", "2025-02-05"))
+        assert out["Record on time"].iloc[0] == False and out["Distribution on time"].iloc[0] == False  # noqa: E712
 
     def test_missing_dates_are_insufficient_not_late(self):
-        out = ndcf.compute_trust_timeline_checks(self._frame("2024-05-01", None, None))
-        assert pd.isna(out["Record ≤ 2 days"].iloc[0]) and pd.isna(out["Distribution ≤ 5 days"].iloc[0])
+        out = ndcf.compute_trust_timeline_checks(self._frame("2025-01-06", None, None))
+        assert pd.isna(out["Record on time"].iloc[0]) and pd.isna(out["Distribution on time"].iloc[0])
 
 
 class TestNdcfSpv:
@@ -181,20 +182,20 @@ class TestValuationTenure:
 
     def test_within_four_years(self):
         out = valuation.evaluate_rows(_valuer_rows("01/04/2022"), self.IND, self.ENT)
-        assert bool(out["Tenure ≤ 4 years"].iloc[0]) and out["Tenure Status"].iloc[0].startswith("✅")
+        assert bool(out["Tenure within limit"].iloc[0]) and out["Tenure Status"].iloc[0].startswith("✅")
 
     def test_over_four_years(self):
         out = valuation.evaluate_rows(_valuer_rows("01/04/2018"), self.IND, self.ENT)
-        assert out["Tenure ≤ 4 years"].iloc[0] == False and "> 4 years" in out["Tenure Status"].iloc[0]  # noqa: E712
+        assert out["Tenure within limit"].iloc[0] == False and "> 4 years" in out["Tenure Status"].iloc[0]  # noqa: E712
 
     def test_missing_appointment_date_is_insufficient_not_over_four_years(self):
         out = valuation.evaluate_rows(_valuer_rows(""), self.IND, self.ENT)
-        assert pd.isna(out["Tenure ≤ 4 years"].iloc[0]) and "Insufficient" in out["Tenure Status"].iloc[0]
-        assert out[~out["Tenure ≤ 4 years"].fillna(True)].empty  # not picked up as a breach by the page
+        assert pd.isna(out["Tenure within limit"].iloc[0]) and "Insufficient" in out["Tenure Status"].iloc[0]
+        assert out[~out["Tenure within limit"].fillna(True)].empty  # not picked up as a breach by the page
 
     def test_unreadable_financial_year_is_insufficient(self):
         out = valuation.evaluate_rows(_valuer_rows("01/04/2022", fy="FY23"), self.IND, self.ENT)
-        assert pd.isna(out["Tenure ≤ 4 years"].iloc[0])
+        assert pd.isna(out["Tenure within limit"].iloc[0])
 
 
 class TestIbbiRegistryMatching:

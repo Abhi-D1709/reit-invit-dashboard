@@ -23,3 +23,4 @@ st.page_link("pages/8_Valuation.py",         label="Valuation",         icon="�
 st.page_link("pages/9_Related_Party.py",         label="Related Party",         icon="🤝")
 st.page_link("pages/10_Investment.py",         label="Investment Conditions",         icon="💰")
 st.page_link("pages/11_Unit_Holding_Pattern.py", label="Unit Holding Pattern", icon="🧮")
+st.page_link("pages/12_Rules_Reference.py", label="Rules reference", icon="📜")

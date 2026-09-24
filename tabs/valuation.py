@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+from utils import rules  # every threshold lives in utils/rules.py
+
 # ------------------------------------------------------------
 # Config & helpers from your common utilities
 # ------------------------------------------------------------
@@ -146,7 +148,7 @@ def evaluate_rows(df: pd.DataFrame, ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFra
     # <NA> when the tenure can't be worked out (missing appointment date or unreadable FY): "insufficient data",
     # not a failure. It used to be False, which reported "> 4 years" for every row with a missing date.
     days = pd.to_numeric(out["Tenure (days)"], errors="coerce")
-    out["Tenure ≤ 4 years"] = (days <= 4 * 365.25).astype("boolean").mask(days.isna())
+    out["Tenure within limit"] = (days <= rules.VALUER_MAX_TENURE_YEARS * 365.25).astype("boolean").mask(days.isna())
 
     index = _registry_index(ibbi_ind, ibbi_ent)
     matches = [
@@ -155,8 +157,8 @@ def evaluate_rows(df: pd.DataFrame, ibbi_ind: pd.DataFrame, ibbi_ent: pd.DataFra
     ]
     out["IBBI Registered?"] = pd.array([m[0] for m in matches], dtype="boolean")  # <NA> = registry unavailable
     out["Matched Type"] = [m[1] for m in matches]
-    out["Tenure Status"] = out["Tenure ≤ 4 years"].map(
-        lambda ok: "⚪ Insufficient data" if pd.isna(ok) else ("✅ OK" if ok else "❌ > 4 years")
+    out["Tenure Status"] = out["Tenure within limit"].map(
+        lambda ok: "⚪ Insufficient data" if pd.isna(ok) else ("✅ OK" if ok else f"❌ > {rules.VALUER_MAX_TENURE_YEARS} years")
     )
 
     def ibbi_status(m):
@@ -220,7 +222,7 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
         e = row.get(end_col + "_dt")
         if pd.notna(s) and pd.notna(e):
             diff = (e - s).days
-            if diff > 15:
+            if diff > rules.VALUATION_REPORT_MAX_DAYS:
                 return f"❌ {diff} days ({label})"
             return f"✅ {diff} days" # Show days even for pass
         return "-"
@@ -272,7 +274,7 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
                     val_rows = out[out["Name of REIT"].str.contains(f_entity[:10], case=False, na=False)]
 
                 # 6-month window logic
-                start_window = f_date - timedelta(days=180)
+                start_window = f_date - timedelta(days=rules.VALUATION_BEFORE_FUNDRAISING_DAYS)
                 
                 # Find the LATEST valid valuation report in that window
                 valid_vals = val_rows[
@@ -372,12 +374,12 @@ def render():
                 show_cols = [c for c in view_cols if c in eval_df.columns]
                 st.dataframe(eval_df[show_cols].sort_values(["Financial Year", "Name of Valuer"], na_position="last"), use_container_width=True, hide_index=True)
 
-                breaches_tenure = eval_df[~eval_df["Tenure ≤ 4 years"].fillna(True)]
+                breaches_tenure = eval_df[~eval_df["Tenure within limit"].fillna(True)]
                 breaches_ibbi   = eval_df[~eval_df["IBBI Registered?"].fillna(True)]
                 if not breaches_tenure.empty or not breaches_ibbi.empty:
                     st.markdown("### Alerts")
                     if not breaches_tenure.empty:
-                        st.error(f"Tenure > 4 years: {len(breaches_tenure)} row(s).")
+                        st.error(f"Tenure > {rules.VALUER_MAX_TENURE_YEARS} years: {len(breaches_tenure)} row(s).")
                         st.dataframe(breaches_tenure[show_cols], use_container_width=True, hide_index=True)
                     if not breaches_ibbi.empty:
                         st.error(f"IBBI registration not found or cancelled: {len(breaches_ibbi)} row(s).")
@@ -396,7 +398,7 @@ def render():
 
             checked_df, freq_alerts, fund_checks = check_timelines_and_completeness(q_time, df_fund)
             
-            st.subheader("1. Submission & Disclosure Timelines (Max 15 days)")
+            st.subheader(f"1. Submission & Disclosure Timelines (Max {rules.VALUATION_REPORT_MAX_DAYS} days)")
             st.caption("Includes Check 3: Date of valuation report vs Date of Disclosure to stock exchanges.")
             
             base_cols = ["Name of REIT", "Financial Year", "Frequency", "Period Ended", "Date of valuation report from valuer"]
@@ -432,7 +434,7 @@ def render():
             st.divider()
 
             st.subheader("3. Fundraising vs. Valuation")
-            st.caption("Proof Table: Checking for a valuation report within 6 months prior to each post-IPO fundraising event.")
+            st.caption(f"Proof Table: Checking for a valuation report within {rules.VALUATION_BEFORE_FUNDRAISING_DAYS} days prior to each post-IPO fundraising event.")
             
             if not fund_checks.empty:
                 f_checks_show = fund_checks.copy()
