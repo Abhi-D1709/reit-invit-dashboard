@@ -121,6 +121,14 @@ def _write_xbrl(xbrl_dir: Path, fname: str, text: str) -> None:
     _xbrl_path(xbrl_dir, fname).write_bytes(gzip.compress(text.encode("utf-8"), compresslevel=9, mtime=0))
 
 
+def _submission_order(filed_at: str, nds_id: str) -> tuple[str, int]:
+    """Sort key for "which submission is later": filing time, then the numeric part of the id
+    (NSE ids increase over time). NSE sometimes lists two records for the same as-on date with the
+    same broadcast time; without the id tie-break the winner would depend on feed order."""
+    digits = re.sub(r"[^0-9]", "", str(nds_id))
+    return (str(filed_at), int(digits) if digits else 0)
+
+
 def _fmt(d: dt.datetime | dt.date) -> str:
     return d.strftime("%d-%b-%Y").upper()
 
@@ -325,7 +333,7 @@ def main() -> int:
             latest: dict[tuple[str, str], dict] = {}  # only the newest submission per (trust, as-on date) is worth downloading
             for r in recs:
                 k = (r["ndsSymbol"], r["asOnDate"])
-                if k not in latest or r["filedAt"] >= latest[k]["filedAt"]:
+                if k not in latest or _submission_order(r["filedAt"], r["ndsID"]) >= _submission_order(latest[k]["filedAt"], latest[k]["ndsID"]):
                     latest[k] = r
             fresh += download_nse_xbrl(list(latest.values()), xbrl_dir, errors)
         except RuntimeError as e:
@@ -345,7 +353,15 @@ def main() -> int:
     # merge into what is stored; latest submission per (trust, as-on date) wins
     merged = pd.concat([f for f in (existing, pd.DataFrame(fresh, columns=COLUMNS)) if not f.empty], ignore_index=True)
     merged["_asof"] = pd.to_datetime(merged["asOnDate"].str.title(), format="%d-%b-%Y", errors="coerce")
-    merged = merged.dropna(subset=["_asof"]).sort_values("filedAt").drop_duplicates(["ndsSymbol", "asOnDate"], keep="last")
+    merged = merged.dropna(subset=["_asof"])
+    merged["_order"] = [_submission_order(f, n) for f, n in zip(merged["filedAt"], merged["ndsID"])]
+    merged = merged.sort_values("_order", kind="stable")
+    # different submissions for the same (trust, as-on date) that disagree on the numbers: note them
+    for (sym, asof), g in merged.groupby(["ndsSymbol", "asOnDate"]):
+        if len(g) > 1 and g["sponsorGroupPer"].round(2).nunique() > 1:
+            vals = "; ".join(f"id {r.ndsID}: sponsor {r.sponsorGroupPer}%" for r in g.itertuples())
+            warnings.append(f"{sym} as on {asof} has conflicting submissions ({vals}); kept the latest.")
+    merged = merged.drop_duplicates(["ndsSymbol", "asOnDate"], keep="last").drop(columns="_order")
     # drop trusts that are no longer in the entities sheet (also removes previously stored ones)
     excluded: list[str] = []
     excluded_rows = 0
