@@ -10,7 +10,7 @@ from utils.common import (
     _find_col, _num_series, _standardize_selector_columns, _to_date,
     load_table_url,
 )
-from utils import periods, rules, status  # every threshold lives in utils/rules.py
+from utils import periods, rules, status, theme  # every threshold lives in utils/rules.py
 from utils.status import CheckResult, Status
 
 # ---------- helpers ----------
@@ -130,12 +130,15 @@ def _sort_fy(values):
 def _stacked_meter_html(s_pct: float, p_pct: float) -> str:
     """
     Single stacked bar:
-    left = Sponsor+Group (blue), right = Public (green).
+    left = Sponsor+Group (theme accent), right = Public (theme secondary), matching the
+    Unit Holding page's sponsor/public colours in light and dark mode.
     Legend shows swatches and icons with percentages.
     """
     s = 0.0 if math.isnan(s_pct) else max(0.0, min(1.0, s_pct))
     # If public pct is NaN, infer from sponsor so bar always sums ~100%
     p = (1.0 - s) if math.isnan(p_pct) else max(0.0, min(1.0, p_pct))
+    sponsor_color = theme.accent()
+    public_color = theme.secondary()
 
     return f"""
 <style>
@@ -147,15 +150,15 @@ def _stacked_meter_html(s_pct: float, p_pct: float) -> str:
   width:12px; height:12px; display:inline-block; border-radius:3px; margin:0 8px;
   vertical-align:middle;
 }}
-.sp-meter .sponsor-swatch {{ background:#2F80ED; }}
-.sp-meter .public-swatch  {{ background:#27AE60; }}
+.sp-meter .sponsor-swatch {{ background:{sponsor_color}; }}
+.sp-meter .public-swatch  {{ background:{public_color}; }}
 .sp-meter .pct {{ font-weight:800; margin-left:8px; color:inherit; }}
 .sp-meter .track {{
   position: relative; height:16px; background:rgba(128,128,128,0.25); border-radius:10px; overflow:hidden;
 }}
 .sp-meter .seg {{ position:absolute; top:0; height:100%; }}
-.sp-meter .sponsor {{ left:0; background:#2F80ED; }}
-.sp-meter .public  {{ left:{s*100:.2f}%; background:#27AE60; }}
+.sp-meter .sponsor {{ left:0; background:{sponsor_color}; }}
+.sp-meter .public  {{ left:{s*100:.2f}%; background:{public_color}; }}
 </style>
 <div class="sp-meter">
   <div class="legend">

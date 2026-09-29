@@ -58,6 +58,13 @@ def load_rpt_data():
 
     return rpt_sheets, borrowings_df
 
+def _filter(df: pd.DataFrame, entity: str, fy: str) -> pd.DataFrame:
+    """Rows for `entity`, and for `fy` too unless it is "All" or the sheet has no Financial Year column."""
+    mask = df["Name of REIT"] == entity
+    if fy != "All" and "Financial Year" in df.columns:
+        mask &= df["Financial Year"].astype(str) == str(fy)
+    return df[mask].copy()
+
 def render():
     st.header("Related Party Transactions")
 
@@ -106,11 +113,7 @@ def render():
     st.subheader("1. Ceased Related Parties")
     
     if not df_s1.empty and "Name of REIT" in df_s1.columns:
-        mask_s1 = df_s1["Name of REIT"] == selected_entity
-        if selected_fy != "All" and "Financial Year" in df_s1.columns:
-            mask_s1 &= df_s1["Financial Year"].astype(str) == str(selected_fy)
-        
-        df1_filtered = df_s1[mask_s1].copy()
+        df1_filtered = _filter(df_s1, selected_entity, selected_fy)
 
         ceased_col = "Relation Ceased with effect from"
         reason_col = "Reason for Related Party Cease/Indentification (For Related Parties identifed/ceased post listing)"
@@ -145,11 +148,7 @@ def render():
     st.subheader("2. Unitholder Approvals")
     
     if not df_s2.empty and "Name of REIT" in df_s2.columns:
-        mask_s2 = df_s2["Name of REIT"] == selected_entity
-        if selected_fy != "All" and "Financial Year" in df_s2.columns:
-            mask_s2 &= df_s2["Financial Year"].astype(str) == str(selected_fy)
-            
-        df2_filtered = df_s2[mask_s2].copy()
+        df2_filtered = _filter(df_s2, selected_entity, selected_fy)
         
         if not df2_filtered.empty:
             st.error("Check this transaction further")
@@ -168,11 +167,7 @@ def render():
     st.caption("Total Value of RPT Transactions vs. Value of REIT Assets (End of FY)")
 
     if not df_s3.empty and "Name of REIT" in df_s3.columns and not borrowings_df.empty:
-        mask_s3 = df_s3["Name of REIT"] == selected_entity
-        if selected_fy != "All":
-            mask_s3 &= df_s3["Financial Year"].astype(str) == str(selected_fy)
-        
-        df3_filtered = df_s3[mask_s3].copy()
+        df3_filtered = _filter(df_s3, selected_entity, selected_fy)
         
         if not df3_filtered.empty:
             st.dataframe(df3_filtered, width="stretch", hide_index=True)
@@ -226,11 +221,7 @@ def render():
     st.subheader("4. Lease Transactions")
     
     if not df_s4.empty and "Name of REIT" in df_s4.columns:
-        mask_s4 = df_s4["Name of REIT"] == selected_entity
-        if selected_fy != "All" and "Financial Year" in df_s4.columns:
-            mask_s4 &= df_s4["Financial Year"].astype(str) == str(selected_fy)
-            
-        df4_filtered = df_s4[mask_s4].copy()
+        df4_filtered = _filter(df_s4, selected_entity, selected_fy)
         target_col = "If Yes, Date of Untiholder Approval"
         
         if target_col in df4_filtered.columns:
@@ -260,11 +251,7 @@ def render():
     st.caption(f"Condition: Value of Transaction <= {rules.RPT_ACQUISITION_LIMIT*100:g}% of Average (Valuation 1, Valuation 2)")
 
     if not df_s5.empty and "Name of REIT" in df_s5.columns:
-        mask_s5 = df_s5["Name of REIT"] == selected_entity
-        if selected_fy != "All" and "Financial Year" in df_s5.columns:
-            mask_s5 &= df_s5["Financial Year"].astype(str) == str(selected_fy)
-            
-        df5_filtered = df_s5[mask_s5].copy()
+        df5_filtered = _filter(df_s5, selected_entity, selected_fy)
         
         col_txn = "Value of Transaction"
         col_v1  = "Valuation 1 (INR Crores)"
@@ -304,11 +291,7 @@ def render():
     st.subheader("6. Annual Report Disclosures")
 
     if not df_s6.empty and "Name of REIT" in df_s6.columns:
-        mask_s6 = df_s6["Name of REIT"] == selected_entity
-        if selected_fy != "All" and "Financial Year" in df_s6.columns:
-            mask_s6 &= df_s6["Financial Year"].astype(str) == str(selected_fy)
-            
-        df6_filtered = df_s6[mask_s6].copy()
+        df6_filtered = _filter(df_s6, selected_entity, selected_fy)
         
         # Cols requested: "Value of RPT > 5% of Value of REIT Assets", "Page No. of Annual Report on which it is disclosed"
         target_cols = [

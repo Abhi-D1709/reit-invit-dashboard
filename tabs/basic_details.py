@@ -1,4 +1,4 @@
-# tabs/directory.py
+# tabs/basic_details.py
 from __future__ import annotations
 
 import re

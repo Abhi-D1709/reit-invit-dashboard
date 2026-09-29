@@ -335,6 +335,44 @@ def _quarter_sort(values):
     return sorted(values, key=lambda v: order.get(str(v), 99))
 
 # ---------- Universal URL Loader ----------
+def _fetch_response(url: str):
+    """GET the URL; None when the request fails or returns an error status."""
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+        resp.raise_for_status()
+        return resp
+    except Exception:
+        return None
+
+
+def _frame_from_json(data) -> pd.DataFrame:
+    """A JSON list becomes rows; a dict's first list under a common key ("data", "rows", ...) becomes
+    rows, else the dict itself is one row."""
+    if isinstance(data, list):
+        return pd.json_normalize(data)
+    if isinstance(data, dict):
+        records = None
+        for key in ["data", "rows", "items", "records", "result"]:
+            if key in data and isinstance(data[key], list):
+                records = data[key]
+                break
+        if records is None:
+            records = [data]
+        return pd.json_normalize(records)
+    return pd.DataFrame(data)
+
+
+def _parse_attempts(url: str):
+    """Parsers to try, in order. A generator so the URL is only fetched (once) if CSV parsing fails;
+    the Excel and JSON-in-response attempts share that response and are skipped if the fetch fails."""
+    yield lambda: pd.read_csv(url)
+    resp = _fetch_response(url)
+    if resp is not None:
+        yield lambda: pd.read_excel(io.BytesIO(resp.content), sheet_name=0)
+        yield lambda: _frame_from_json(resp.json())
+    yield lambda: pd.read_json(url)
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def load_table_url(url: str) -> pd.DataFrame:
     if not url or not str(url).strip():
@@ -342,53 +380,15 @@ def load_table_url(url: str) -> pd.DataFrame:
     url = url.strip()
     if "docs.google.com/spreadsheets" in url:
         url = _share_to_csv_url(url)
-    # CSV
-    try:
-        df = pd.read_csv(url)
+    # CSV, Excel (bytes), JSON in the same response, JSON via pandas: first non-empty table wins
+    for parse in _parse_attempts(url):
+        try:
+            df = parse()
+        except Exception:
+            continue
         if isinstance(df, pd.DataFrame) and not df.empty:
             return df
-    except Exception:
-        pass
-    # Excel (bytes)
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=25)
-        resp.raise_for_status()
-        try:
-            df = pd.read_excel(io.BytesIO(resp.content), sheet_name=0)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                return df
-        except Exception:
-            pass
-        # JSON in same response
-        try:
-            data = resp.json()
-            if isinstance(data, list):
-                df = pd.json_normalize(data)
-            elif isinstance(data, dict):
-                records = None
-                for key in ["data", "rows", "items", "records", "result"]:
-                    if key in data and isinstance(data[key], list):
-                        records = data[key]; break
-                if records is None:
-                    records = [data]
-                df = pd.json_normalize(records)
-            else:
-                df = pd.DataFrame(data)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                return df
-        except Exception:
-            pass
-    except Exception:
-        pass
-    # JSON via pandas
-    try:
-        df = pd.read_json(url)
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            return df
-    except Exception:
-        pass
-    # HTML table(s)
+    # HTML table(s): the largest one, returned even if empty
     try:
         tables = pd.read_html(url)
         if tables:

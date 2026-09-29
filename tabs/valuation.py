@@ -186,7 +186,12 @@ def load_valuation_timelines_sheet(url: str, gid: str) -> pd.DataFrame:
             return df
         except Exception:
             return pd.DataFrame()
-    return load_table_url(url, gid=int(gid))
+    # non-Google URL: load_table_url has no notion of a sheet gid (that's a Google Sheets concept,
+    # handled above), so it's called plainly; the same graceful-empty fallback as the branch above.
+    try:
+        return load_table_url(url)
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def load_fundraising_data(url: str) -> pd.DataFrame:
@@ -197,12 +202,24 @@ def load_fundraising_data(url: str) -> pd.DataFrame:
         df["FundDate"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
     return df
 
+_COL_REPORT = "Date of valuation report from valuer"
+
+
 def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if df.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    
+
+    out = _with_timeline_checks(df)
+    df_freq_alerts = _frequency_alerts(out)
+    df_fund_checks = _fundraising_checks(out, fund_df)
+    return out, df_freq_alerts, df_fund_checks
+
+
+def _with_timeline_checks(df: pd.DataFrame) -> pd.DataFrame:
+    """Checks 1-3: copy of `df` with parsed "<col>_dt" date columns and a "Check: ..." column for each
+    submission/disclosure timeline (valuation report date to trustee submission, NAV and report disclosure)."""
     out = df.copy()
-    
-    col_report = "Date of valuation report from valuer"
+
+    col_report = _COL_REPORT
     col_trustee = "Date of submission of Valuation Report to Trustee"
     col_nav = "Date of disclosure of NAV to the Stock Exchanges"
     
@@ -236,7 +253,11 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
         if col_discl + "_dt" in out.columns:
             out["Check: Report Disclosure"] = out.apply(lambda r: calc_delay(r, col_report, col_discl, "Report"), axis=1)
 
-    # --- Checks 4 & 5: Frequency Completeness ---
+    return out
+
+
+def _frequency_alerts(out: pd.DataFrame) -> pd.DataFrame:
+    """Checks 4 & 5: one alert row per (REIT, FY) missing an annual/March or a half-year/Sept valuation."""
     grouped = out.groupby(["Name of REIT", "Financial Year"])
     freq_alerts = []
     
@@ -254,9 +275,12 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
         if not has_half:
             freq_alerts.append({"Name of REIT": reit, "Financial Year": fy, "Issue": "Missing Half-Year/Sept Valuation"})
     
-    df_freq_alerts = pd.DataFrame(freq_alerts)
+    return pd.DataFrame(freq_alerts)
 
-    # --- Check 6: Fundraising Correlation ---
+
+def _fundraising_checks(out: pd.DataFrame, fund_df: pd.DataFrame) -> pd.DataFrame:
+    """Check 6: for each post-IPO fundraising, is there a valuation report in the window before it?"""
+    col_report = _COL_REPORT
     fund_checks = []
     if not fund_df.empty and col_report + "_dt" in out.columns and "Name of REIT" in out.columns:
         type_col = _find_col(fund_df.columns, aliases=["Type of Issue"])
@@ -300,10 +324,8 @@ def check_timelines_and_completeness(df: pd.DataFrame, fund_df: pd.DataFrame) ->
                     "Days Prior": days_prior if days_prior is not None else "-",
                     "Status": verdict
                 })
-    
-    df_fund_checks = pd.DataFrame(fund_checks)
 
-    return out, df_freq_alerts, df_fund_checks
+    return pd.DataFrame(fund_checks)
 
 # ------------------------------------------------------------
 # UI

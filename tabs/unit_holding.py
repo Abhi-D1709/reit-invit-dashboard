@@ -393,10 +393,9 @@ def _render_without_xbrl(record, as_on_date, entity_df, entity) -> None:
     render_trend_section(entity_df, record["secLname"])
 
 
-def render():
-    st.title("Unit Holding Pattern Analysis", icon=":material/account_balance:")
-    st.caption("REITs & InvITs listed on NSE and BSE — SEBI-prescribed Unit Holding Pattern format")
-
+def _render_sidebar():
+    """Sidebar controls. Returns (index_label, master_df, view_mode, entity, as_on_date, entity_df);
+    the last three are None in peer-benchmarking mode. Stops the script when no filings are available."""
     with st.sidebar:
         st.subheader("Select filing", icon=":material/tune:")
         index_label = st.segmented_control(
@@ -450,6 +449,197 @@ def render():
             filing_source.clear_caches()
             st.rerun()
 
+    return index_label, master_df, view_mode, entity, as_on_date, entity_df
+
+
+def _render_filing_banner(header_info: dict, record, as_on_date) -> None:
+    with st.container(border=True):
+        c1, c2 = st.columns([2.2, 1])
+        with c1:
+            st.markdown(f"##### {header_info.get('Name of the Entity') or record['secLname']}")
+            badges = (
+                f":blue-badge[NSE: {header_info.get('NSE Symbol') or '—'}] "
+                f":gray-badge[BSE: {header_info.get('BSE Scrip Code') or '—'}] "
+                f":orange-badge[{header_info.get('Type of Report') or '—'}]"
+            )
+            st.markdown(badges)
+            st.caption(f"SEBI Registration No.: {header_info.get('SEBI Registration Number') or '—'}")
+        with c2:
+            st.markdown(f"**As on date**  \n{as_on_date}")
+            fy = f"{header_info.get('Financial Year Start') or '—'} to {header_info.get('Financial Year End') or '—'}"
+            st.caption(f"FY: {fy}")
+
+
+def _render_overview_tab(parsed, total_units, sponsor_pct, public_pct, locked_in_pct, pledged_pct) -> None:
+    with st.container(horizontal=True):
+        st.metric("Total units outstanding", f"{total_units:,.0f}", border=True)
+        st.metric("Sponsor & sponsor group holding", f"{sponsor_pct:.2f}%", border=True)
+        st.metric("Public holding", f"{public_pct:.2f}%", border=True)
+        st.metric("Units mandatorily held / locked-in", f"{locked_in_pct:.2f}%", border=True)
+        st.metric("Units pledged / encumbered", f"{pledged_pct:.2f}%", border=True)
+
+    col1, col2 = st.columns([1, 1.4])
+    with col1:
+        with st.container(border=True):
+            st.markdown("**Sponsor vs public**")
+            st.plotly_chart(render_donut(sponsor_pct, public_pct), width="stretch")
+    with col2:
+        with st.container(border=True):
+            st.markdown("**Category-wise holding**")
+            breakdown_df = sebi_format.build_category_breakdown(parsed)
+            if not breakdown_df.empty:
+                st.plotly_chart(render_category_bar(breakdown_df), width="stretch")
+            else:
+                st.caption("No non-zero category breakdown reported in this filing.")
+
+
+def _render_domestic_foreign_tab(dom_for_report: dict, as_on_date) -> None:
+    st.subheader("Domestic vs foreign ownership", icon=":material/public:")
+    st.caption(f"As on {as_on_date} — overall, and split by sponsor group vs. public")
+
+    dom_for_table = dom_for_report["table"]
+    overall_row = dom_for_table[dom_for_table["Segment"] == "Overall"].iloc[0]
+    with st.container(horizontal=True):
+        st.metric("Overall domestic holding", f"{overall_row['Domestic %']:.2f}%", border=True)
+        st.metric("Overall foreign holding", f"{overall_row['Foreign %']:.2f}%", border=True)
+        if overall_row["Unclassified %"] > 0:
+            st.metric("Unclassified", f"{overall_row['Unclassified %']:.2f}%", border=True)
+
+    col1, col2 = st.columns([1.2, 1])
+    with col1:
+        with st.container(border=True):
+            st.markdown("**Domestic vs foreign, by segment**")
+            st.plotly_chart(render_domestic_foreign_bar(dom_for_table), width="stretch")
+    with col2:
+        with st.container(border=True):
+            st.markdown("**Summary table**")
+            display_cols = ["Segment", "Domestic %", "Foreign %", "Unclassified %"]
+            st.dataframe(
+                dom_for_table[display_cols].style.format(
+                    {c: "{:,.2f}%" for c in display_cols if c != "Segment"}
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption("Figures are % of that segment's own total units (Sponsor, Public, or Overall).")
+
+    with st.expander("Units (absolute) and classification methodology", icon=":material/info:"):
+        units_cols = ["Segment", "Domestic units", "Foreign units", "Unclassified units", "Total units"]
+        st.dataframe(
+            dom_for_table[units_cols].style.format({c: "{:,.0f}" for c in units_cols if c != "Segment"}),
+            width="stretch",
+            hide_index=True,
+        )
+        st.markdown(
+            "**Methodology:** Sponsor & Sponsor Group is split into Domestic/Foreign directly from "
+            "SEBI's Table I categories (Indian vs. Foreign sub-totals). Public holding has no such "
+            "direct split in the SEBI taxonomy, so it is derived: Foreign Portfolio Investors, Foreign "
+            "Venture Capital Investors and Non-Resident Indians are treated as foreign; Mutual Funds, "
+            "domestic Financial Institutions/Banks, Insurance Companies, Provident/Pension Funds, "
+            "resident Individuals, NBFCs, Trusts, Clearing Members and Bodies Corporate are treated as "
+            "domestic. Each 'Any Other (specify)' category is classified line-by-line from its disclosed "
+            "nature (e.g. 'Foreign Company', 'Non-Resident...'); a lump sum with no such break-up "
+            "disclosed is marked **Unclassified** rather than guessed."
+        )
+        if not dom_for_report["audit"].empty:
+            st.markdown("**'Any Other' break-up classification audit:**")
+            audit_df = dom_for_report["audit"][["Bucket", "Nature of 'Any Other'", "No. of units held", "Classified as"]]
+            st.dataframe(
+                audit_df.style.format({"No. of units held": "{:,.0f}"}),
+                width="stretch",
+                hide_index=True,
+            )
+
+
+def _render_table_i_tab(parsed, as_on_date) -> None:
+    st.subheader("Table I: Statement showing unit holding pattern", icon=":material/table_chart:")
+    st.caption(f"As on {as_on_date}")
+    table_i = sebi_format.build_table_i(parsed)
+    st.dataframe(style_table_i(table_i), width="stretch", height=760, hide_index=True)
+
+    any_other = sebi_format.build_any_other_breakup(parsed)
+    if any_other:
+        st.subheader("Break-up of 'Any Other' categories", icon=":material/list_alt:")
+        for title, df in any_other.items():
+            with st.expander(title):
+                st.dataframe(
+                    df.style.format(
+                        {c: "{:,.2f}" for c in df.columns if c not in ("S.No.", "Nature of 'Any Other'")}
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+
+def _render_table_ii_tab(parsed) -> None:
+    st.subheader("Table II(A): Unit holders other than sponsor", icon=":material/groups:")
+    df_holders = sebi_format.build_other_unitholders_table(parsed)
+    if df_holders.empty:
+        st.caption("Not disclosed in this filing.")
+    else:
+        st.dataframe(df_holders, width="stretch", hide_index=True)
+
+    st.subheader(
+        "Table II(B): Unit holding of shareholders/partners of the Manager/Investment Manager",
+        icon=":material/business_center:",
+    )
+    df_mgr = sebi_format.build_manager_shareholders_table(parsed)
+    if df_mgr.empty:
+        st.caption("Not disclosed in this filing.")
+    else:
+        st.dataframe(df_mgr, width="stretch", hide_index=True)
+
+
+def _render_table_iii_tab(parsed) -> None:
+    st.subheader("Table III: Directors / KMPs of the Manager / Investment Manager", icon=":material/badge:")
+    df_dir = sebi_format.build_directors_kmp_table(parsed)
+    if df_dir.empty:
+        st.caption("Not disclosed in this filing.")
+    else:
+        for _, row in df_dir.iterrows():
+            with st.expander(f"{row['Name']} — {row['Designation'] or ''}"):
+                st.markdown(f"**Action:** {row['Appointment/Resignation/Removal'] or '—'}")
+                st.markdown(f"**Date:** {row['Date'] or '—'}")
+                if row["Brief Profile"]:
+                    st.write(row["Brief Profile"])
+
+
+def _render_reports_tab(parsed, header_info: dict, record, as_on_date, entity_df: pd.DataFrame, entity) -> None:
+    st.subheader("Export report", icon=":material/description:")
+    with st.container(border=True):
+        st.markdown(f"**Filing report** — {header_info.get('Name of the Entity') or entity}, as on {as_on_date}")
+        excel_bytes = reports.build_excel_report(parsed, header_info, as_on_date)
+        st.download_button(
+            "Download Excel report (SEBI format)",
+            data=excel_bytes,
+            file_name=f"UHP_{record['ndsSymbol']}_{as_on_date}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            icon=":material/download:",
+        )
+
+    with st.container(border=True):
+        st.markdown(f"**Historical trend data** — {header_info.get('Name of the Entity') or entity}")
+        trend_csv = reports.build_trend_csv(
+            entity_df[["asOnDate", "sponsorGroupPer", "publicHoldingPer", "submissionDate", "xbrlFilePath"]]
+        )
+        st.download_button(
+            "Download trend data (CSV)",
+            data=trend_csv,
+            file_name=f"UHP_trend_{record['ndsSymbol']}.csv",
+            mime="text/csv",
+            icon=":material/download:",
+        )
+
+    with st.expander("Raw XBRL source", icon=":material/code:"):
+        st.link_button("Open source XBRL filing", record["xbrlFilePath"], icon=":material/open_in_new:")
+
+
+def render():
+    st.title("Unit Holding Pattern Analysis", icon=":material/account_balance:")
+    st.caption("REITs & InvITs listed on NSE and BSE — SEBI-prescribed Unit Holding Pattern format")
+
+    index_label, master_df, view_mode, entity, as_on_date, entity_df = _render_sidebar()
+
     if view_mode == "Peer benchmarking":
         render_peer_benchmarking(index_label, master_df)
         return
@@ -469,22 +659,7 @@ def render():
     total_units = to_number(parsed.get("TotalUnitsOutstandingI", "NumberOfUnitsHeld"))
     dom_for_report = ownership_reports.build_domestic_foreign_report(parsed)
 
-    # Filing identity banner
-    with st.container(border=True):
-        c1, c2 = st.columns([2.2, 1])
-        with c1:
-            st.markdown(f"##### {header_info.get('Name of the Entity') or record['secLname']}")
-            badges = (
-                f":blue-badge[NSE: {header_info.get('NSE Symbol') or '—'}] "
-                f":gray-badge[BSE: {header_info.get('BSE Scrip Code') or '—'}] "
-                f":orange-badge[{header_info.get('Type of Report') or '—'}]"
-            )
-            st.markdown(badges)
-            st.caption(f"SEBI Registration No.: {header_info.get('SEBI Registration Number') or '—'}")
-        with c2:
-            st.markdown(f"**As on date**  \n{as_on_date}")
-            fy = f"{header_info.get('Financial Year Start') or '—'} to {header_info.get('Financial Year End') or '—'}"
-            st.caption(f"FY: {fy}")
+    _render_filing_banner(header_info, record, as_on_date)
 
     tab_overview, tab_domfor, tab_table1, tab_table2, tab_table3, tab_trend, tab_report = st.tabs(
         [
@@ -499,163 +674,16 @@ def render():
     )
 
     with tab_overview:
-        with st.container(horizontal=True):
-            st.metric("Total units outstanding", f"{total_units:,.0f}", border=True)
-            st.metric("Sponsor & sponsor group holding", f"{sponsor_pct:.2f}%", border=True)
-            st.metric("Public holding", f"{public_pct:.2f}%", border=True)
-            st.metric("Units mandatorily held / locked-in", f"{locked_in_pct:.2f}%", border=True)
-            st.metric("Units pledged / encumbered", f"{pledged_pct:.2f}%", border=True)
-
-        col1, col2 = st.columns([1, 1.4])
-        with col1:
-            with st.container(border=True):
-                st.markdown("**Sponsor vs public**")
-                st.plotly_chart(render_donut(sponsor_pct, public_pct), width="stretch")
-        with col2:
-            with st.container(border=True):
-                st.markdown("**Category-wise holding**")
-                breakdown_df = sebi_format.build_category_breakdown(parsed)
-                if not breakdown_df.empty:
-                    st.plotly_chart(render_category_bar(breakdown_df), width="stretch")
-                else:
-                    st.caption("No non-zero category breakdown reported in this filing.")
-
+        _render_overview_tab(parsed, total_units, sponsor_pct, public_pct, locked_in_pct, pledged_pct)
     with tab_domfor:
-        st.subheader("Domestic vs foreign ownership", icon=":material/public:")
-        st.caption(f"As on {as_on_date} — overall, and split by sponsor group vs. public")
-
-        dom_for_table = dom_for_report["table"]
-        overall_row = dom_for_table[dom_for_table["Segment"] == "Overall"].iloc[0]
-        with st.container(horizontal=True):
-            st.metric("Overall domestic holding", f"{overall_row['Domestic %']:.2f}%", border=True)
-            st.metric("Overall foreign holding", f"{overall_row['Foreign %']:.2f}%", border=True)
-            if overall_row["Unclassified %"] > 0:
-                st.metric("Unclassified", f"{overall_row['Unclassified %']:.2f}%", border=True)
-
-        col1, col2 = st.columns([1.2, 1])
-        with col1:
-            with st.container(border=True):
-                st.markdown("**Domestic vs foreign, by segment**")
-                st.plotly_chart(render_domestic_foreign_bar(dom_for_table), width="stretch")
-        with col2:
-            with st.container(border=True):
-                st.markdown("**Summary table**")
-                display_cols = ["Segment", "Domestic %", "Foreign %", "Unclassified %"]
-                st.dataframe(
-                    dom_for_table[display_cols].style.format(
-                        {c: "{:,.2f}%" for c in display_cols if c != "Segment"}
-                    ),
-                    width="stretch",
-                    hide_index=True,
-                )
-                st.caption("Figures are % of that segment's own total units (Sponsor, Public, or Overall).")
-
-        with st.expander("Units (absolute) and classification methodology", icon=":material/info:"):
-            units_cols = ["Segment", "Domestic units", "Foreign units", "Unclassified units", "Total units"]
-            st.dataframe(
-                dom_for_table[units_cols].style.format({c: "{:,.0f}" for c in units_cols if c != "Segment"}),
-                width="stretch",
-                hide_index=True,
-            )
-            st.markdown(
-                "**Methodology:** Sponsor & Sponsor Group is split into Domestic/Foreign directly from "
-                "SEBI's Table I categories (Indian vs. Foreign sub-totals). Public holding has no such "
-                "direct split in the SEBI taxonomy, so it is derived: Foreign Portfolio Investors, Foreign "
-                "Venture Capital Investors and Non-Resident Indians are treated as foreign; Mutual Funds, "
-                "domestic Financial Institutions/Banks, Insurance Companies, Provident/Pension Funds, "
-                "resident Individuals, NBFCs, Trusts, Clearing Members and Bodies Corporate are treated as "
-                "domestic. Each 'Any Other (specify)' category is classified line-by-line from its disclosed "
-                "nature (e.g. 'Foreign Company', 'Non-Resident...'); a lump sum with no such break-up "
-                "disclosed is marked **Unclassified** rather than guessed."
-            )
-            if not dom_for_report["audit"].empty:
-                st.markdown("**'Any Other' break-up classification audit:**")
-                audit_df = dom_for_report["audit"][["Bucket", "Nature of 'Any Other'", "No. of units held", "Classified as"]]
-                st.dataframe(
-                    audit_df.style.format({"No. of units held": "{:,.0f}"}),
-                    width="stretch",
-                    hide_index=True,
-                )
-
+        _render_domestic_foreign_tab(dom_for_report, as_on_date)
     with tab_table1:
-        st.subheader("Table I: Statement showing unit holding pattern", icon=":material/table_chart:")
-        st.caption(f"As on {as_on_date}")
-        table_i = sebi_format.build_table_i(parsed)
-        st.dataframe(style_table_i(table_i), width="stretch", height=760, hide_index=True)
-
-        any_other = sebi_format.build_any_other_breakup(parsed)
-        if any_other:
-            st.subheader("Break-up of 'Any Other' categories", icon=":material/list_alt:")
-            for title, df in any_other.items():
-                with st.expander(title):
-                    st.dataframe(
-                        df.style.format(
-                            {c: "{:,.2f}" for c in df.columns if c not in ("S.No.", "Nature of 'Any Other'")}
-                        ),
-                        width="stretch",
-                        hide_index=True,
-                    )
-
+        _render_table_i_tab(parsed, as_on_date)
     with tab_table2:
-        st.subheader("Table II(A): Unit holders other than sponsor", icon=":material/groups:")
-        df_holders = sebi_format.build_other_unitholders_table(parsed)
-        if df_holders.empty:
-            st.caption("Not disclosed in this filing.")
-        else:
-            st.dataframe(df_holders, width="stretch", hide_index=True)
-
-        st.subheader(
-            "Table II(B): Unit holding of shareholders/partners of the Manager/Investment Manager",
-            icon=":material/business_center:",
-        )
-        df_mgr = sebi_format.build_manager_shareholders_table(parsed)
-        if df_mgr.empty:
-            st.caption("Not disclosed in this filing.")
-        else:
-            st.dataframe(df_mgr, width="stretch", hide_index=True)
-
+        _render_table_ii_tab(parsed)
     with tab_table3:
-        st.subheader("Table III: Directors / KMPs of the Manager / Investment Manager", icon=":material/badge:")
-        df_dir = sebi_format.build_directors_kmp_table(parsed)
-        if df_dir.empty:
-            st.caption("Not disclosed in this filing.")
-        else:
-            for _, row in df_dir.iterrows():
-                with st.expander(f"{row['Name']} — {row['Designation'] or ''}"):
-                    st.markdown(f"**Action:** {row['Appointment/Resignation/Removal'] or '—'}")
-                    st.markdown(f"**Date:** {row['Date'] or '—'}")
-                    if row["Brief Profile"]:
-                        st.write(row["Brief Profile"])
-
+        _render_table_iii_tab(parsed)
     with tab_trend:
         render_trend_section(entity_df, header_info.get('Name of the Entity') or entity)
-
     with tab_report:
-        st.subheader("Export report", icon=":material/description:")
-        with st.container(border=True):
-            st.markdown(f"**Filing report** — {header_info.get('Name of the Entity') or entity}, as on {as_on_date}")
-            excel_bytes = reports.build_excel_report(parsed, header_info, as_on_date)
-            st.download_button(
-                "Download Excel report (SEBI format)",
-                data=excel_bytes,
-                file_name=f"UHP_{record['ndsSymbol']}_{as_on_date}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                icon=":material/download:",
-            )
-
-        with st.container(border=True):
-            st.markdown(f"**Historical trend data** — {header_info.get('Name of the Entity') or entity}")
-            trend_csv = reports.build_trend_csv(
-                entity_df[["asOnDate", "sponsorGroupPer", "publicHoldingPer", "submissionDate", "xbrlFilePath"]]
-            )
-            st.download_button(
-                "Download trend data (CSV)",
-                data=trend_csv,
-                file_name=f"UHP_trend_{record['ndsSymbol']}.csv",
-                mime="text/csv",
-                icon=":material/download:",
-            )
-
-        with st.expander("Raw XBRL source", icon=":material/code:"):
-            st.link_button("Open source XBRL filing", record["xbrlFilePath"], icon=":material/open_in_new:")
-
+        _render_reports_tab(parsed, header_info, record, as_on_date, entity_df, entity)

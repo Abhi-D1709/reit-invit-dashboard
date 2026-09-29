@@ -134,37 +134,61 @@ def _load_all_sheets(url: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame
 # --------------------------------------------------------------------
 # Core evaluation per-committee (DIRECTOR-ONLY counting where relevant)
 # --------------------------------------------------------------------
+_MEMBER_TYPE_COL = "Type of Members of Committee"
+_MEMBER_ROLE_COL = "Role of Members of Committee"
+_CHAIR_COL = "Is this Member the Chairperson for the Committee"
+
+
+def _director_counts(df: pd.DataFrame) -> Tuple[pd.DataFrame, int, int]:
+    """(director rows, number of directors, number of independent directors)."""
+    df_dir = _filter_directors(df)
+    indep = df_dir[_MEMBER_TYPE_COL].apply(_is_independent).sum()
+    return df_dir, len(df_dir), indep
+
+
+def _chair_check(df: pd.DataFrame, column: str, predicate, label: str) -> Tuple[bool, str]:
+    """(chairperson rows that are directors all satisfy `predicate` on `column`, detail text).
+    Fails when no chairperson is marked or the marked chairperson is not a director."""
+    chair_rows_all = df[df[_CHAIR_COL].apply(_as_bool)]
+    if chair_rows_all.empty:
+        return False, "Chairperson: None found"
+    chair_rows_dir = _filter_directors(chair_rows_all)
+    if chair_rows_dir.empty:
+        return False, "Chairperson is not a director"
+    chair_ok = chair_rows_dir[column].apply(predicate).all()
+    return chair_ok, f"{label}: {', '.join(chair_rows_dir[column].tolist())}"
+
+
+def _min_directors_row(members: int) -> tuple:
+    return (f"Min {thresholds.COMMITTEE_MIN_DIRECTORS} directors", members >= thresholds.COMMITTEE_MIN_DIRECTORS,
+            f"Members (directors only): {members}")
+
+
+def _independent_share_row(indep: int, members: int) -> tuple:
+    num, den = thresholds.COMMITTEE_INDEPENDENT_SHARE
+    share_ok = indep * den >= members * num if members else False
+    return (f"≥ {num}/{den} independent", bool(share_ok),
+            f"Independent (of directors): {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)")
+
+
+def _min_independent_row(indep: int, members: int) -> tuple:
+    return (f"≥ {thresholds.COMMITTEE_MIN_INDEPENDENT} independent", indep >= thresholds.COMMITTEE_MIN_INDEPENDENT,
+            f"Independent (of directors): {indep}/{members}")
+
+
 def evaluate_audit(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    df_dir = _filter_directors(df)
-    members = len(df_dir)
-    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
-    indep_ratio_ok = indep * thresholds.COMMITTEE_INDEPENDENT_SHARE[1] >= members * thresholds.COMMITTEE_INDEPENDENT_SHARE[0] if members else False
-
+    df_dir, members, indep = _director_counts(df)
     has_fin_exp = df_dir[
         "Is this member identified as having accounting or related Financial Management Expertise."
     ].apply(_as_bool).any()
-
-    chair_rows_all = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
-    if chair_rows_all.empty:
-        chair_indep = False
-        chair_detail = "Chairperson: None found"
-    else:
-        chair_rows_dir = _filter_directors(chair_rows_all)
-        if chair_rows_dir.empty:
-            chair_indep = False
-            chair_detail = "Chairperson is not a director"
-        else:
-            chair_indep = chair_rows_dir["Type of Members of Committee"].apply(_is_independent).all()
-            chair_types = ", ".join(chair_rows_dir["Type of Members of Committee"].tolist())
-            chair_detail = f"Chair type: {chair_types}"
+    chair_indep, chair_detail = _chair_check(df, _MEMBER_TYPE_COL, _is_independent, "Chair type")
 
     rows = [
-        (f"Min {thresholds.COMMITTEE_MIN_DIRECTORS} directors", members >= thresholds.COMMITTEE_MIN_DIRECTORS, f"Members (directors only): {members}"),
-        (f"≥ {thresholds.COMMITTEE_INDEPENDENT_SHARE[0]}/{thresholds.COMMITTEE_INDEPENDENT_SHARE[1]} independent", bool(indep_ratio_ok),
-         f"Independent (of directors): {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
+        _min_directors_row(members),
+        _independent_share_row(indep, members),
         ("≥ 1 member has financial expertise", bool(has_fin_exp), "Yes" if has_fin_exp else "No"),
         ("Chairperson is independent", bool(chair_indep), chair_detail),
     ]
@@ -175,32 +199,15 @@ def evaluate_nrc(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    df_dir = _filter_directors(df)
-    members = len(df_dir)
-    all_non_exec = df_dir["Role of Members of Committee"].apply(_is_non_exec).all() if members else False
-    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
-    indep_ratio_ok = indep * thresholds.COMMITTEE_INDEPENDENT_SHARE[1] >= members * thresholds.COMMITTEE_INDEPENDENT_SHARE[0] if members else False
-
-    chair_rows_all = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
-    if chair_rows_all.empty:
-        chair_indep = False
-        chair_detail = "Chairperson: None found"
-    else:
-        chair_rows_dir = _filter_directors(chair_rows_all)
-        if chair_rows_dir.empty:
-            chair_indep = False
-            chair_detail = "Chairperson is not a director"
-        else:
-            chair_indep = chair_rows_dir["Type of Members of Committee"].apply(_is_independent).all()
-            chair_types = ", ".join(chair_rows_dir["Type of Members of Committee"].tolist())
-            chair_detail = f"Chair type: {chair_types}"
+    df_dir, members, indep = _director_counts(df)
+    all_non_exec = df_dir[_MEMBER_ROLE_COL].apply(_is_non_exec).all() if members else False
+    chair_indep, chair_detail = _chair_check(df, _MEMBER_TYPE_COL, _is_independent, "Chair type")
 
     rows = [
-        (f"Min {thresholds.COMMITTEE_MIN_DIRECTORS} directors", members >= thresholds.COMMITTEE_MIN_DIRECTORS, f"Members (directors only): {members}"),
+        _min_directors_row(members),
         ("All non-executive", bool(all_non_exec),
          "All non-executive (directors)" if all_non_exec else "Found executive director(s)"),
-        (f"≥ {thresholds.COMMITTEE_INDEPENDENT_SHARE[0]}/{thresholds.COMMITTEE_INDEPENDENT_SHARE[1]} independent", bool(indep_ratio_ok),
-         f"Independent (of directors): {indep}/{members} ({(indep/members*100 if members else 0):.0f}%)"),
+        _independent_share_row(indep, members),
         ("Chairperson is independent", bool(chair_indep), chair_detail),
     ]
     return _to_table(rows)
@@ -210,28 +217,13 @@ def evaluate_src(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    df_dir = _filter_directors(df)
-    members = len(df_dir)
-    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
-
-    chair_rows_all = df[df["Is this Member the Chairperson for the Committee"].apply(_as_bool)]
-    if chair_rows_all.empty:
-        chair_non_exec = False
-        chair_detail = "Chairperson: None found"
-    else:
-        chair_rows_dir = _filter_directors(chair_rows_all)
-        if chair_rows_dir.empty:
-            chair_non_exec = False
-            chair_detail = "Chairperson is not a director"
-        else:
-            chair_non_exec = chair_rows_dir["Role of Members of Committee"].apply(_is_non_exec).all()
-            roles = ", ".join(chair_rows_dir["Role of Members of Committee"].tolist())
-            chair_detail = f"Chair role: {roles}"
+    _, members, indep = _director_counts(df)
+    chair_non_exec, chair_detail = _chair_check(df, _MEMBER_ROLE_COL, _is_non_exec, "Chair role")
 
     rows = [
         ("Chairperson is non-executive", bool(chair_non_exec), chair_detail),
-        (f"Min {thresholds.COMMITTEE_MIN_DIRECTORS} directors", members >= thresholds.COMMITTEE_MIN_DIRECTORS, f"Members (directors only): {members}"),
-        (f"≥ {thresholds.COMMITTEE_MIN_INDEPENDENT} independent", indep >= thresholds.COMMITTEE_MIN_INDEPENDENT, f"Independent (of directors): {indep}/{members}"),
+        _min_directors_row(members),
+        _min_independent_row(indep, members),
     ]
     return _to_table(rows)
 
@@ -240,13 +232,11 @@ def evaluate_rmc(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return _empty_table("No rows for this committee/period.")
 
-    df_dir = _filter_directors(df)
-    members = len(df_dir)
-    indep = df_dir["Type of Members of Committee"].apply(_is_independent).sum()
+    _, members, indep = _director_counts(df)
 
     rows = [
-        (f"Min {thresholds.COMMITTEE_MIN_DIRECTORS} directors", members >= thresholds.COMMITTEE_MIN_DIRECTORS, f"Members (directors only): {members}"),
-        (f"≥ {thresholds.COMMITTEE_MIN_INDEPENDENT} independent", indep >= thresholds.COMMITTEE_MIN_INDEPENDENT, f"Independent (of directors): {indep}/{members}"),
+        _min_directors_row(members),
+        _min_independent_row(indep, members),
     ]
     return _to_table(rows)
 
@@ -273,6 +263,77 @@ def _parse_meeting_dates(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 
+# --------------------------------------------------------------------
+# Shared meeting algorithm (committees on Sheet2, Board on Sheet3):
+# meeting count, max gap between meetings, and per-meeting quorum / independents present
+# --------------------------------------------------------------------
+_INDEP_PRESENT_COL = "Total No. of Independent directors in the meeting"
+
+
+def _sorted_meetings(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    """Copy of `df` with a parsed "Meeting Date" column, sorted by it."""
+    out = df.copy()
+    out["Meeting Date"] = _parse_meeting_dates(out[date_col])
+    return out.sort_values("Meeting Date")
+
+
+def _max_gap_check(meeting_dates: pd.Series, max_gap_days) -> Tuple[bool, Optional[int]]:
+    """(every gap between consecutive meetings <= max_gap_days, worst gap in days or None)."""
+    gap_ok = True
+    worst_gap = None
+    if len(meeting_dates) >= 2:
+        diffs = (meeting_dates.diff().dt.days).iloc[1:]
+        if not diffs.empty:
+            worst_gap = int(diffs.max())
+            gap_ok = bool((diffs <= max_gap_days).all())
+    return gap_ok, worst_gap
+
+
+def _count_or_none(value) -> Optional[int]:
+    num = pd.to_numeric(value, errors="coerce")
+    return int(num) if not pd.isna(num) else None
+
+
+def _meets_minimum(observed: Optional[int], needed: Optional[int]) -> bool:
+    return observed is not None and needed is not None and observed >= needed
+
+
+def _check_each_meeting(
+    meetings: pd.DataFrame, present_col: str, quorum_needed: Optional[int], indep_needed: Optional[int]
+) -> Tuple[List[Dict], bool]:
+    """Per-meeting attendance checks. Returns one dict per meeting (date, present, indep_present,
+    q_ok, id_ok) and whether every meeting met both quorum and the independents minimum."""
+    results = []
+    all_meets_ok = True
+    for _, row in meetings.iterrows():
+        present = _count_or_none(row.get(present_col, ""))
+        indep_present = _count_or_none(row.get(_INDEP_PRESENT_COL, ""))
+        q_ok = _meets_minimum(present, quorum_needed)
+        id_ok = _meets_minimum(indep_present, indep_needed)
+        results.append({
+            "date": row["Meeting Date"].date() if pd.notna(row["Meeting Date"]) else "—",
+            "present": present if present is not None else "—",
+            "indep_present": indep_present if indep_present is not None else "—",
+            "q_ok": q_ok,
+            "id_ok": id_ok,
+        })
+        all_meets_ok = all_meets_ok and q_ok and id_ok
+    return results, all_meets_ok
+
+
+def _pass_fail(ok: bool) -> str:
+    return status.PASS_TAG if ok else status.FAIL_TAG
+
+
+def _all_pass_or(per_table: pd.DataFrame, column: str, failure_text: str) -> str:
+    return "OK" if per_table[column].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, failure_text)
+
+
+def _gap_status(gap_ok: bool, worst_gap: Optional[int], max_gap_days) -> str:
+    gap_text = (f"Worst gap: {worst_gap} (OK≤{max_gap_days})" if worst_gap is not None else "—")
+    return status.tag(status.Status.PASS if gap_ok else status.Status.FAIL, gap_text)
+
+
 def evaluate_meetings_for_committee(
     comp_now: pd.DataFrame,
     meetings_fy: pd.DataFrame,
@@ -281,8 +342,9 @@ def evaluate_meetings_for_committee(
     rules = thresholds.GOVERNANCE_MEETING_RULES[committee]
     size = _committee_size_from_comp(comp_now, committee)
     quorum_needed = max(2, math.ceil(size / 3)) if size else None
+    gap_days_rule = rules.get("gap_days")
 
-    m = meetings_fy[meetings_fy["Type of Committee"].str.lower() == committee.lower()].copy()
+    m = meetings_fy[meetings_fy["Type of Committee"].str.lower() == committee.lower()]
 
     if m.empty:
         summary_rows = [
@@ -290,67 +352,48 @@ def evaluate_meetings_for_committee(
             {"Rule": "Quorum per meeting", "Expected": quorum_needed if quorum_needed is not None else "n/a", "Observed/Status": "—"},
             {"Rule": "Min independent directors per meeting", "Expected": rules.get("min_indep_present", "—"), "Observed/Status": "—"},
         ]
-        if rules.get("gap_days") is not None:
-            summary_rows.append({"Rule": "Max gap between meetings (days)", "Expected": rules["gap_days"], "Observed/Status": "—"})
+        if gap_days_rule is not None:
+            summary_rows.append({"Rule": "Max gap between meetings (days)", "Expected": gap_days_rule, "Observed/Status": "—"})
         return pd.DataFrame(summary_rows), pd.DataFrame(), False
 
-    m["Meeting Date"] = _parse_meeting_dates(m["Date of Meeting of Committee"])
-    m = m.sort_values("Meeting Date")
+    m = _sorted_meetings(m, "Date of Meeting of Committee")
 
     meet_cnt = len(m)
     freq_ok = meet_cnt >= int(rules["min_meetings"])
 
-    gap_days_rule = rules.get("gap_days")
-    gap_ok = True
-    worst_gap = None
-    if gap_days_rule is not None and meet_cnt >= 2:
-        diffs = (m["Meeting Date"].diff().dt.days).iloc[1:]
-        if not diffs.empty:
-            worst_gap = int(diffs.max())
-            gap_ok = bool((diffs <= gap_days_rule).all())
+    gap_ok, worst_gap = (True, None) if gap_days_rule is None else _max_gap_check(m["Meeting Date"], gap_days_rule)
 
-    per_rows = []
-    all_meets_ok = True
-    for _, row in m.iterrows():
-        present = pd.to_numeric(row.get("Total No. of Members Present in the Meeting", ""), errors="coerce")
-        indep_present = pd.to_numeric(row.get("Total No. of Independent directors in the meeting", ""), errors="coerce")
-        present = int(present) if not pd.isna(present) else None
-        indep_present = int(indep_present) if not pd.isna(indep_present) else None
-
-        q_needed = quorum_needed if quorum_needed is not None else "-"
-        q_ok = (present is not None and quorum_needed is not None and present >= quorum_needed)
-        id_needed = thresholds.GOVERNANCE_MEETING_RULES[committee].get("min_indep_present")
-        id_ok = (indep_present is not None and id_needed is not None and indep_present >= id_needed)
-
-        per_rows.append(
-            {
-                "Date": row["Meeting Date"].date() if pd.notna(row["Meeting Date"]) else "—",
-                "Members Present": present if present is not None else "—",
-                "Independent Present": indep_present if indep_present is not None else "—",
-                "Quorum Needed": q_needed,
-                "Quorum OK": status.PASS_TAG if q_ok else status.FAIL_TAG,
-                "Independents Needed": id_needed if id_needed is not None else "—",
-                "IDs OK": status.PASS_TAG if id_ok else status.FAIL_TAG,
-            }
-        )
-        all_meets_ok = all_meets_ok and q_ok and id_ok
-
-    per_table = pd.DataFrame(per_rows)
+    id_needed = rules.get("min_indep_present")
+    checks, all_meets_ok = _check_each_meeting(
+        m, "Total No. of Members Present in the Meeting", quorum_needed, id_needed
+    )
+    per_table = pd.DataFrame([
+        {
+            "Date": c["date"],
+            "Members Present": c["present"],
+            "Independent Present": c["indep_present"],
+            "Quorum Needed": quorum_needed if quorum_needed is not None else "-",
+            "Quorum OK": _pass_fail(c["q_ok"]),
+            "Independents Needed": id_needed if id_needed is not None else "—",
+            "IDs OK": _pass_fail(c["id_ok"]),
+        }
+        for c in checks
+    ])
 
     summary_rows = [
-        {"Rule": "Meetings in FY", "Expected": thresholds.GOVERNANCE_MEETING_RULES[committee]["min_meetings"],
-         "Observed/Status": f"{meet_cnt} ({status.PASS_TAG if freq_ok else status.FAIL_TAG})"},
+        {"Rule": "Meetings in FY", "Expected": rules["min_meetings"],
+         "Observed/Status": f"{meet_cnt} ({_pass_fail(freq_ok)})"},
         {"Rule": "Quorum per meeting", "Expected": quorum_needed if quorum_needed is not None else "n/a",
-         "Observed/Status": "OK" if per_table["Quorum OK"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings fail quorum")},
-        {"Rule": "Min independent directors per meeting", "Expected": thresholds.GOVERNANCE_MEETING_RULES[committee].get("min_indep_present", "—"),
-         "Observed/Status": "OK" if per_table["IDs OK"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings lack IDs")},
+         "Observed/Status": _all_pass_or(per_table, "Quorum OK", "Some meetings fail quorum")},
+        {"Rule": "Min independent directors per meeting", "Expected": rules.get("min_indep_present", "—"),
+         "Observed/Status": _all_pass_or(per_table, "IDs OK", "Some meetings lack IDs")},
     ]
     if gap_days_rule is not None:
-        gap_text = (f"Worst gap: {worst_gap} (OK≤{gap_days_rule})" if worst_gap is not None else "—")
         summary_rows.append({"Rule": "Max gap between meetings (days)", "Expected": gap_days_rule,
-                             "Observed/Status": status.tag(status.Status.PASS if gap_ok else status.Status.FAIL, gap_text)})
+                             "Observed/Status": _gap_status(gap_ok, worst_gap, gap_days_rule)})
 
-    all_ok = freq_ok and all_meets_ok if gap_days_rule is None else (freq_ok and gap_ok and all_meets_ok)
+    # gap_ok is True when the committee has no gap rule, so this covers both cases
+    all_ok = freq_ok and gap_ok and all_meets_ok
     return pd.DataFrame(summary_rows), per_table, all_ok
 
 
@@ -381,65 +424,46 @@ def evaluate_board_meetings(comp_e_fy: pd.DataFrame, board_fy: pd.DataFrame) -> 
         )
         return summary, pd.DataFrame(), False
 
-    board = board_fy.copy()
-    board["Meeting Date"] = _parse_meeting_dates(board["Date of Board Meeting"])
-    board = board.sort_values("Meeting Date")
+    board = _sorted_meetings(board_fy, "Date of Board Meeting")
 
     meet_cnt = len(board)
     freq_ok = meet_cnt >= thresholds.BOARD_MIN_MEETINGS
 
-    worst_gap = None
-    gap_ok = True
-    if meet_cnt >= 2:
-        diffs = (board["Meeting Date"].diff().dt.days).iloc[1:]
-        if not diffs.empty:
-            worst_gap = int(diffs.max())
-            gap_ok = bool((diffs <= thresholds.BOARD_MAX_GAP_DAYS).all())
+    gap_ok, worst_gap = _max_gap_check(board["Meeting Date"], thresholds.BOARD_MAX_GAP_DAYS)
 
     board_size, prov = _board_size_from_sheet1_or_observed(comp_e_fy, board)
     quorum_needed = max(thresholds.BOARD_QUORUM_MIN, math.ceil(board_size / 3)) if board_size else None
 
-    per_rows = []
-    all_meets_ok = True
-    for _, r in board.iterrows():
-        present = pd.to_numeric(r.get("Total No. of Directors Present in the Meeting", ""), errors="coerce")
-        indep_present = pd.to_numeric(r.get("Total No. of Independent directors in the meeting", ""), errors="coerce")
-        present = int(present) if not pd.isna(present) else None
-        indep_present = int(indep_present) if not pd.isna(indep_present) else None
+    checks, all_meets_ok = _check_each_meeting(
+        board, "Total No. of Directors Present in the Meeting", quorum_needed, thresholds.BOARD_MIN_INDEPENDENT_PRESENT
+    )
+    per_table = pd.DataFrame([
+        {
+            "Date": c["date"],
+            "Directors Present": c["present"],
+            "Independent Present": c["indep_present"],
+            "Quorum Needed": quorum_needed if quorum_needed is not None else f"n/a ({prov})",
+            "Quorum OK": _pass_fail(c["q_ok"]),
+            "≥1 ID Present": _pass_fail(c["id_ok"]),
+        }
+        for c in checks
+    ])
 
-        q_ok = (present is not None and quorum_needed is not None and present >= quorum_needed)
-        id_ok = (indep_present is not None and indep_present >= thresholds.BOARD_MIN_INDEPENDENT_PRESENT)
-
-        per_rows.append(
-            {
-                "Date": r["Meeting Date"].date() if pd.notna(r["Meeting Date"]) else "—",
-                "Directors Present": present if present is not None else "—",
-                "Independent Present": indep_present if indep_present is not None else "—",
-                "Quorum Needed": quorum_needed if quorum_needed is not None else f"n/a ({prov})",
-                "Quorum OK": status.PASS_TAG if q_ok else status.FAIL_TAG,
-                "≥1 ID Present": status.PASS_TAG if id_ok else status.FAIL_TAG,
-            }
-        )
-        all_meets_ok = all_meets_ok and q_ok and id_ok
-
-    per_table = pd.DataFrame(per_rows)
-
-    gap_text = (f"Worst gap: {worst_gap} (OK≤{thresholds.BOARD_MAX_GAP_DAYS})" if worst_gap is not None else "—")
     summary = pd.DataFrame(
         [
-            {"Rule": "Board meetings in FY", "Expected": thresholds.BOARD_MIN_MEETINGS, "Observed/Status": f"{meet_cnt} ({status.PASS_TAG if freq_ok else status.FAIL_TAG})"},
+            {"Rule": "Board meetings in FY", "Expected": thresholds.BOARD_MIN_MEETINGS, "Observed/Status": f"{meet_cnt} ({_pass_fail(freq_ok)})"},
             {
                 "Rule": "Quorum per meeting",
                 "Expected": f"max({thresholds.BOARD_QUORUM_MIN}, ceil(BoardSize/3)) [{prov}]",
-                "Observed/Status": "OK" if per_table["Quorum OK"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings fail quorum"),
+                "Observed/Status": _all_pass_or(per_table, "Quorum OK", "Some meetings fail quorum"),
             },
             {
                 "Rule": "Independent Director present (each mtg)",
                 "Expected": f"≥ {thresholds.BOARD_MIN_INDEPENDENT_PRESENT}",
-                "Observed/Status": "OK" if per_table["≥1 ID Present"].eq(status.PASS_TAG).all() else status.tag(status.Status.FAIL, "Some meetings lack IDs"),
+                "Observed/Status": _all_pass_or(per_table, "≥1 ID Present", "Some meetings lack IDs"),
             },
             {"Rule": "Max gap between meetings (days)", "Expected": thresholds.BOARD_MAX_GAP_DAYS,
-             "Observed/Status": status.tag(status.Status.PASS if gap_ok else status.Status.FAIL, gap_text)},
+             "Observed/Status": _gap_status(gap_ok, worst_gap, thresholds.BOARD_MAX_GAP_DAYS)},
         ]
     )
     all_ok = freq_ok and gap_ok and all_meets_ok

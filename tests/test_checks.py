@@ -290,3 +290,45 @@ class TestSponsorHelpers:
 
     def test_sorting_survives_unreadable_years(self):
         assert sponsor_holding._sort_fy(["2024-25", "abc", "2022-23"]) == ["2022-23", "2024-25", "abc"]
+
+
+# ------------------------------------------------------- related party (entity/FY filter)
+class TestRelatedPartyFilter:
+    def test_filters_by_entity_and_fy(self):
+        df = pd.DataFrame({
+            "Name of REIT": ["A REIT", "A REIT", "B REIT"],
+            "Financial Year": ["2023-24", "2024-25", "2023-24"],
+        })
+        out = related_party._filter(df, "A REIT", "2023-24")
+        assert len(out) == 1 and out.iloc[0]["Financial Year"] == "2023-24"
+
+    def test_all_skips_the_fy_filter(self):
+        df = pd.DataFrame({"Name of REIT": ["A REIT", "A REIT"], "Financial Year": ["2023-24", "2024-25"]})
+        assert len(related_party._filter(df, "A REIT", "All")) == 2
+
+    def test_a_sheet_with_no_financial_year_column_does_not_crash(self):
+        # Sheet3 (RPT Intensity) used to skip this guard and raise a KeyError on a sheet without
+        # a Financial Year column when a specific FY was selected; it must behave like every other
+        # section instead: filter by entity only.
+        df = pd.DataFrame({"Name of REIT": ["A REIT", "B REIT"]})
+        out = related_party._filter(df, "A REIT", "2023-24")
+        assert len(out) == 1 and out.iloc[0]["Name of REIT"] == "A REIT"
+
+
+# ------------------------------------------------------- valuation timelines (non-Google URL)
+class TestValuationTimelinesNonGoogleUrl:
+    def test_falls_back_to_load_table_url_without_a_gid(self, monkeypatch):
+        # load_valuation_timelines_sheet used to call load_table_url(url, gid=int(gid)), but
+        # load_table_url takes no gid argument; that raised a TypeError for any non-Google URL.
+        calls = []
+        monkeypatch.setattr(valuation, "load_table_url", lambda url: (calls.append(url), pd.DataFrame({"x": [1]}))[1])
+        out = valuation.load_valuation_timelines_sheet.__wrapped__("https://example.com/sheet.csv", "12345")
+        assert calls == ["https://example.com/sheet.csv"] and list(out["x"]) == [1]
+
+    def test_a_load_failure_returns_an_empty_frame_not_an_exception(self, monkeypatch):
+        def boom(url):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(valuation, "load_table_url", boom)
+        out = valuation.load_valuation_timelines_sheet.__wrapped__("https://example.com/sheet.csv", "12345")
+        assert out.empty
