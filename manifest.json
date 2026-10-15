@@ -1,6 +1,6 @@
 {
  "bse": {
-  "checked_through": "2026-10-14",
+  "checked_through": "2026-10-15",
   "no_file_dates": [
    "2017-01-26",
    "2017-02-24",
@@ -142,7 +142,7 @@
   ]
  },
  "errors": [],
- "generated_at": "2026-10-14T19:33:11Z",
+ "generated_at": "2026-10-15T19:17:58Z",
  "history_start": "2017-01-01",
  "ibbi": {
   "entities": 140,
@@ -156,14 +156,14 @@
    "BSE:540526": {
     "checked_through": "2026-09-23",
     "first": "2017-05-18",
-    "last": "2026-10-14",
-    "rows": 2269
+    "last": "2026-10-15",
+    "rows": 2270
    },
    "BSE:540565": {
     "checked_through": "2026-09-23",
     "first": "2017-06-06",
-    "last": "2026-10-14",
-    "rows": 2247
+    "last": "2026-10-15",
+    "rows": 2248
    },
    "BSE:541300": {
     "checked_through": "2026-09-21",
@@ -174,38 +174,38 @@
    "BSE:542543": {
     "checked_through": "2026-09-23",
     "first": "2020-08-25",
-    "last": "2026-10-14",
-    "rows": 518
+    "last": "2026-10-15",
+    "rows": 519
    },
    "BSE:542602": {
     "checked_through": "2026-09-23",
     "first": "2019-04-01",
-    "last": "2026-10-14",
-    "rows": 1869
+    "last": "2026-10-15",
+    "rows": 1870
    },
    "BSE:543217": {
     "checked_through": "2026-09-23",
     "first": "2020-08-07",
-    "last": "2026-10-14",
-    "rows": 1536
+    "last": "2026-10-15",
+    "rows": 1537
    },
    "BSE:543225": {
     "checked_through": "2026-09-22",
     "first": "2023-08-30",
-    "last": "2026-10-14",
-    "rows": 276
+    "last": "2026-10-15",
+    "rows": 277
    },
    "BSE:543261": {
     "checked_through": "2026-09-23",
     "first": "2021-02-16",
-    "last": "2026-10-14",
-    "rows": 1403
+    "last": "2026-10-15",
+    "rows": 1404
    },
    "BSE:543290": {
     "checked_through": "2026-09-23",
     "first": "2021-05-14",
-    "last": "2026-10-14",
-    "rows": 1346
+    "last": "2026-10-15",
+    "rows": 1347
    },
    "BSE:543385": {
     "checked_through": "2026-07-29",
@@ -222,14 +222,14 @@
    "BSE:543899": {
     "checked_through": "2026-09-23",
     "first": "2024-05-10",
-    "last": "2026-10-14",
-    "rows": 184
+    "last": "2026-10-15",
+    "rows": 185
    },
    "BSE:543913": {
     "checked_through": "2026-09-23",
     "first": "2023-05-19",
-    "last": "2026-10-14",
-    "rows": 846
+    "last": "2026-10-15",
+    "rows": 847
    },
    "BSE:543925": {
     "checked_through": "2026-09-08",
@@ -246,14 +246,14 @@
    "BSE:544137": {
     "checked_through": "2026-09-23",
     "first": "2024-03-12",
-    "last": "2026-10-14",
-    "rows": 642
+    "last": "2026-10-15",
+    "rows": 643
    },
    "BSE:544338": {
     "checked_through": "2026-09-23",
     "first": "2025-01-17",
-    "last": "2026-10-14",
-    "rows": 431
+    "last": "2026-10-15",
+    "rows": 432
    },
    "BSE:544374": {
     "checked_through": "2026-09-22",
@@ -264,197 +264,197 @@
    "BSE:544481": {
     "checked_through": "2026-09-23",
     "first": "2025-08-18",
-    "last": "2026-10-14",
-    "rows": 287
+    "last": "2026-10-15",
+    "rows": 288
    },
    "BSE:544579": {
     "checked_through": "2026-09-23",
     "first": "2025-10-16",
-    "last": "2026-10-14",
-    "rows": 237
+    "last": "2026-10-15",
+    "rows": 238
    },
    "BSE:544734": {
     "checked_through": "2026-09-23",
     "first": "2026-03-24",
-    "last": "2026-10-14",
-    "rows": 138
+    "last": "2026-10-15",
+    "rows": 139
    },
    "BSE:544753": {
     "checked_through": "2026-09-23",
     "first": "2026-04-29",
-    "last": "2026-10-14",
-    "rows": 115
+    "last": "2026-10-15",
+    "rows": 116
    },
    "BSE:544758": {
     "checked_through": "2026-09-23",
     "first": "2026-05-14",
-    "last": "2026-10-14",
-    "rows": 106
+    "last": "2026-10-15",
+    "rows": 107
    },
    "NSE:ANANTAM:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2025-10-16",
-    "last": "2026-10-14",
-    "rows": 246
+    "last": "2026-10-15",
+    "rows": 247
    },
    "NSE:ANZEN:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2022-12-07",
-    "last": "2026-10-09",
-    "rows": 201
+    "last": "2026-10-15",
+    "rows": 202
    },
    "NSE:BAGMANE:RR": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2026-05-14",
-    "last": "2026-10-14",
-    "rows": 106
+    "last": "2026-10-15",
+    "rows": 107
    },
    "NSE:BIRET:RR": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2021-02-16",
-    "last": "2026-10-14",
-    "rows": 1403
+    "last": "2026-10-15",
+    "rows": 1404
    },
    "NSE:CAPINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2025-01-17",
-    "last": "2026-10-14",
-    "rows": 431
+    "last": "2026-10-15",
+    "rows": 432
    },
    "NSE:CITIUSINVT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2026-04-29",
-    "last": "2026-10-14",
-    "rows": 116
+    "last": "2026-10-15",
+    "rows": 117
    },
    "NSE:CUBEINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2023-10-10",
-    "last": "2026-10-14",
-    "rows": 241
+    "last": "2026-10-15",
+    "rows": 242
    },
    "NSE:EMBASSY:RR": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2019-04-01",
-    "last": "2026-10-14",
-    "rows": 1869
+    "last": "2026-10-15",
+    "rows": 1870
    },
    "NSE:INDIGRID:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2017-06-06",
-    "last": "2026-10-14",
-    "rows": 2317
+    "last": "2026-10-15",
+    "rows": 2318
    },
    "NSE:INDUSINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2024-03-12",
-    "last": "2026-10-14",
-    "rows": 642
+    "last": "2026-10-15",
+    "rows": 643
    },
    "NSE:INTERISE:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2018-05-14",
     "last": "2025-09-16",
     "rows": 8
    },
    "NSE:IRBINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2017-05-18",
-    "last": "2026-10-14",
-    "rows": 2333
+    "last": "2026-10-15",
+    "rows": 2334
    },
    "NSE:IRBIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2024-06-13",
     "last": "2024-06-13",
     "rows": 1
    },
    "NSE:KRT:RR": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2025-08-18",
-    "last": "2026-10-14",
-    "rows": 287
+    "last": "2026-10-15",
+    "rows": 288
    },
    "NSE:MINDSPACE:RR": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2020-08-07",
-    "last": "2026-10-14",
-    "rows": 1536
+    "last": "2026-10-15",
+    "rows": 1537
    },
    "NSE:NDRINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2024-02-14",
     "last": "2026-10-14",
     "rows": 165
    },
    "NSE:NHIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2021-11-11",
-    "last": "2026-10-12",
-    "rows": 345
+    "last": "2026-10-15",
+    "rows": 346
    },
    "NSE:NXST:RR": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2023-05-19",
-    "last": "2026-10-14",
-    "rows": 846
+    "last": "2026-10-15",
+    "rows": 847
    },
    "NSE:NXT-INFRA:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2024-07-02",
     "last": "2026-10-14",
     "rows": 62
    },
    "NSE:OSEINTRUST:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": null,
     "last": null,
     "rows": 0
    },
    "NSE:PGINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2021-05-14",
-    "last": "2026-10-14",
-    "rows": 1346
+    "last": "2026-10-15",
+    "rows": 1347
    },
    "NSE:RIIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2026-03-24",
-    "last": "2026-10-14",
-    "rows": 138
+    "last": "2026-10-15",
+    "rows": 139
    },
    "NSE:ROADSTAR:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": null,
     "last": null,
     "rows": 0
    },
    "NSE:SEITINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2024-02-12",
     "last": "2026-10-13",
     "rows": 56
    },
    "NSE:SHREMINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2021-09-22",
     "last": "2026-10-14",
     "rows": 264
    },
    "NSE:TVSINVIT:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2025-07-08",
     "last": "2026-10-01",
     "rows": 56
    },
    "NSE:VERTIS:IV": {
-    "checked_through": "2026-10-14",
+    "checked_through": "2026-10-15",
     "first": "2025-09-01",
-    "last": "2026-10-14",
-    "rows": 215
+    "last": "2026-10-15",
+    "rows": 216
    }
   },
-  "last_date": "2026-10-14",
+  "last_date": "2026-10-15",
   "months": [
    "2017-05",
    "2017-06",
@@ -571,7 +571,7 @@
    "2026-09",
    "2026-10"
   ],
-  "rows": 29965
+  "rows": 30000
  },
  "uhp": {
   "bse_filings": 72,
@@ -579,10 +579,10 @@
   "entities": 32,
   "errors": [],
   "excluded_symbols": [],
-  "filings": 487,
-  "generated_at": "2026-10-14T19:34:31Z",
+  "filings": 493,
+  "generated_at": "2026-10-15T19:19:21Z",
   "latest_as_on": "2026-09-30",
-  "nse_filings": 415,
+  "nse_filings": 421,
   "warnings": [
    "BSE blocked the archive request for 5 of 5 BSE-only trust(s) (HTTP 403, usual for cloud hosts); their filings were not refreshed. Run `python -m jobs.ingest_uhp` from a normal connection to refresh them."
   ],
