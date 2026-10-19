@@ -145,10 +145,10 @@
  "generated_at": "2026-10-17T17:53:52Z",
  "history_start": "2017-01-01",
  "ibbi": {
-  "entities": 140,
+  "entities": 142,
   "errors": [],
-  "generated_at": "2026-10-12T11:13:30Z",
-  "individuals": 6316
+  "generated_at": "2026-10-19T09:12:42Z",
+  "individuals": 6345
  },
  "trades": {
   "first_date": "2017-05-18",
